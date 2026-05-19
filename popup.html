@@ -178,10 +178,23 @@
     }
 
     /* ===== Actions ===== */
+    .actions-primary {
+      margin-bottom: 8px;
+    }
     .actions {
       display: grid;
-      grid-template-columns: auto 1fr;
+      grid-template-columns: 1fr 1fr;
       gap: 8px;
+    }
+    .btn-wide { width: 100%; }
+    .btn-danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid rgba(255, 84, 112, 0.4);
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: rgba(255, 84, 112, 0.08);
+      border-color: var(--danger);
     }
     button {
       font-family: inherit;
@@ -356,11 +369,16 @@
     </div>
   </div>
 
+  <div class="actions-primary">
+    <button id="captureBtn" class="btn-primary btn-wide" disabled>
+      <span id="captureLabel">Start Capture</span>
+    </button>
+  </div>
   <div class="actions">
     <button id="autoScrollBtn" class="btn-secondary" disabled title="Auto-scroll the thread to load more history">
       <span id="autoScrollLabel">Auto-scroll</span>
     </button>
-    <button id="exportBtn" class="btn-primary" disabled>Export JSON</button>
+    <button id="exportBtn" class="btn-secondary" disabled>Export JSON</button>
   </div>
 
   <div id="errorCard" class="error-card" hidden>

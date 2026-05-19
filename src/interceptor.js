@@ -1,12 +1,59 @@
 // src/interceptor.js
 (function() {
   const OriginalXHR = window.XMLHttpRequest;
-  
+
   window._igExporterStore = window._igExporterStore || {
     threads: new Map(), // thread_key or thread_id -> { threadInfo, messages: Map() }
     aliases: new Map(), // alias id -> canonical id
     latestUpdatedId: null
   };
+
+  // Default OFF — user must click "Start Capture" in the popup before any
+  // GraphQL responses are processed and stored.
+  if (typeof window._igExporterCapturing !== 'boolean') {
+    window._igExporterCapturing = false;
+  }
+
+  /* ===== Exportable filter (mirrors normalizer.js logic) ===== */
+  function getXmaMediaUrl(xma) {
+    return (
+      xma?.preview_image?.url ||
+      xma?.preview_image?.fallback_url ||
+      xma?.xmaPreviewImage?.url ||
+      xma?.xmaPreviewImage?.fallback_url ||
+      null
+    );
+  }
+  function getMediaUrlFromNode(node) {
+    return (
+      getXmaMediaUrl(node.content?.xma) ||
+      node.content?.preview_image?.url ||
+      node.content?.preview_image?.fallback_url ||
+      node.content?.image?.url ||
+      node.content?.image?.uri ||
+      node.content?.image_versions2?.candidates?.[0]?.url ||
+      node.media?.image_versions2?.candidates?.[0]?.url ||
+      node.media?.video_versions?.[0]?.url ||
+      node.media?.audio?.url ||
+      null
+    );
+  }
+  function isExportable(node) {
+    if (!node) return false;
+    const ct = node.content_type;
+    if (ct === 'REACTION_LOG_XMAT' || ct === 'ACTION_LOG' || ct === 'IgDirectThreadActionLogXPItem') {
+      return false;
+    }
+    if ((typeof node.text_body === 'string' && node.text_body.trim()) ||
+        (typeof node.igd_snippet === 'string' && node.igd_snippet.trim())) {
+      return true;
+    }
+    if (Array.isArray(node.reactions) && node.reactions.length > 0) return true;
+    if (ct === 'AUDIOS') return true; // normalizer falls back to a placeholder uri
+    if (ct === 'MESSAGE_INLINE_SHARE' || ct === 'MONTAGE_SHARE_XMA') return true;
+    if (ct === 'IMAGES' || ct === 'VIDEOS') return getMediaUrlFromNode(node) !== null;
+    return false;
+  }
 
   function getOrInitThread(id) {
     if (!id) return null;
@@ -112,6 +159,7 @@
   }
 
   function processGraphQLResponse(payload) {
+    if (!window._igExporterCapturing) return;
     const data = typeof payload === 'string' ? tryParseJSON(payload) : payload;
     if (!data || typeof data !== 'object') return;
 
@@ -194,8 +242,16 @@
         return null;
       }
 
+      function exportableCount(store) {
+        let n = 0;
+        for (const msg of store.messages.values()) {
+          if (isExportable(msg)) n++;
+        }
+        return n;
+      }
+
       for (const [key, store] of window._igExporterStore.threads.entries()) {
-        threadCounts[key] = store.messages.size;
+        threadCounts[key] = exportableCount(store);
         const t = titleFor(store);
         if (t) threadTitles[key] = t;
       }
@@ -203,7 +259,7 @@
       for (const [alias, canonical] of window._igExporterStore.aliases.entries()) {
         const store = window._igExporterStore.threads.get(canonical);
         if (store) {
-          threadCounts[alias] = store.messages.size;
+          threadCounts[alias] = exportableCount(store);
           const t = titleFor(store);
           if (t) threadTitles[alias] = t;
         }
@@ -258,11 +314,17 @@
 
   interceptXHR();
   interceptFetch();
-  console.log('[ig-exporter] Interceptor installed for XHR and fetch');
+  console.log('[ig-exporter] Interceptor installed (idle — waiting for Start Capture).');
 
-  // Provide a global function to get normalized data (for acceptance testing)
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
+
+    if (event.data?.type === 'IG_EXPORTER_SET_CAPTURING') {
+      window._igExporterCapturing = !!event.data.capturing;
+      console.log(`[ig-exporter] Capture ${window._igExporterCapturing ? 'STARTED' : 'STOPPED'}.`);
+      return;
+    }
+
     if (event.data?.type === 'IG_EXPORTER_GET_STORE') {
       const activeId = event.data.activeId || window._igExporterStore.latestUpdatedId;
       const canonicalId = getCanonicalId(activeId) || getCanonicalId(window._igExporterStore.latestUpdatedId) || activeId;

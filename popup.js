@@ -5,6 +5,8 @@ const els = {
   threadName: document.getElementById("threadName"),
   msgCount: document.getElementById("msgCount"),
   progress: document.getElementById("progress"),
+  captureBtn: document.getElementById("captureBtn"),
+  captureLabel: document.getElementById("captureLabel"),
   autoScrollBtn: document.getElementById("autoScrollBtn"),
   autoScrollLabel: document.getElementById("autoScrollLabel"),
   exportBtn: document.getElementById("exportBtn"),
@@ -23,13 +25,14 @@ const state = {
   count: 0,
   threadTitle: "",
   autoScrolling: false,
+  capturing: false,
   lastError: null,
   phase: "idle", // idle | capturing | scrolling | exporting | success | error
 };
 
 const HINTS = {
   no_thread: "Open a DM conversation at instagram.com/direct/t/...",
-  no_messages: "Scroll up inside the thread once to trigger Instagram's history fetch.",
+  no_messages: "Click Start Capture, then scroll up inside the thread to load history.",
   validation: "The data Instagram returned didn't match the expected shape. Try refreshing the page and capturing again.",
   download: "Chrome blocked the download. Check your download settings or try again.",
   unknown: "Try refreshing the Instagram tab, then reopen this popup.",
@@ -37,8 +40,8 @@ const HINTS = {
 
 function setPhase(phase, label, sub) {
   state.phase = phase;
-  els.statusDot.dataset.state = phase === "idle" ? "idle"
-    : phase === "capturing" || phase === "exporting" ? "capturing"
+  els.statusDot.dataset.state =
+    phase === "capturing" || phase === "exporting" ? "capturing"
     : phase === "scrolling" ? "scrolling"
     : phase === "success" ? "success"
     : phase === "error" ? "error"
@@ -51,6 +54,36 @@ function setPhase(phase, label, sub) {
     els.progress.classList.add("active");
   } else {
     els.progress.classList.remove("active");
+  }
+}
+
+function renderButtons() {
+  // Capture toggle
+  if (state.capturing) {
+    els.captureLabel.textContent = "Stop Capture";
+    els.captureBtn.classList.remove("btn-primary");
+    els.captureBtn.classList.add("btn-danger");
+  } else {
+    els.captureLabel.textContent = "Start Capture";
+    els.captureBtn.classList.add("btn-primary");
+    els.captureBtn.classList.remove("btn-danger");
+  }
+  els.captureBtn.disabled = !state.isInstagram;
+
+  // Auto-scroll requires capture to be on
+  els.autoScrollBtn.disabled = !state.capturing;
+  els.autoScrollLabel.textContent = state.autoScrolling ? "Stop scroll" : "Auto-scroll";
+  els.autoScrollBtn.classList.toggle("active", state.autoScrolling);
+
+  // Export available whenever we have data (even after stopping)
+  if (state.count > 0 && state.phase !== "exporting") {
+    els.exportBtn.disabled = false;
+    els.exportBtn.classList.remove("btn-secondary");
+    els.exportBtn.classList.add("btn-primary");
+  } else if (state.phase !== "exporting") {
+    els.exportBtn.disabled = true;
+    els.exportBtn.classList.add("btn-secondary");
+    els.exportBtn.classList.remove("btn-primary");
   }
 }
 
@@ -77,11 +110,8 @@ function updateCount(newCount) {
   const old = state.count;
   state.count = newCount;
   animateCount(old, newCount);
-  if (newCount > 0) {
-    els.exportBtn.disabled = false;
-    // Refresh thread label so the "No thread captured yet" fallback updates
-    if (!state.threadTitle) updateThread(null);
-  }
+  if (!state.threadTitle) updateThread(null);
+  renderButtons();
 }
 
 function updateThread(title) {
@@ -92,11 +122,10 @@ function updateThread(title) {
     }
     return;
   }
-  // No title yet — distinguish "we have data but no name" from "nothing captured"
   if (state.count > 0) {
     els.threadName.textContent = "Active thread";
   } else {
-    els.threadName.textContent = "No thread captured yet";
+    els.threadName.textContent = state.capturing ? "Waiting for messages…" : "Not capturing";
   }
 }
 
@@ -116,8 +145,10 @@ function showError(title, body, problems) {
   els.errorBody.textContent = body + (problems?.length ? `\n• ${problems.slice(0, 3).join("\n• ")}` : "");
   els.errorHint.textContent = HINTS[classifyError(body, problems)] || "";
   els.errorCard.hidden = false;
-  els.exportBtn.disabled = state.count === 0;
-  els.exportBtn.textContent = state.count > 0 ? "Retry Export" : "Export JSON";
+  renderButtons();
+  if (state.count > 0) {
+    els.exportBtn.textContent = "Retry Export";
+  }
 }
 
 function clearError() {
@@ -132,10 +163,19 @@ function showToast(msg, ms = 1600) {
   showToast._t = setTimeout(() => els.toast.classList.remove("show"), ms);
 }
 
-function setAutoScrollUI(scrolling) {
-  state.autoScrolling = scrolling;
-  els.autoScrollLabel.textContent = scrolling ? "Stop" : "Auto-scroll";
-  els.autoScrollBtn.classList.toggle("active", scrolling);
+function applyCaptureState(on) {
+  state.capturing = on;
+  if (on) {
+    setPhase("capturing", "Capturing", state.count > 0 ? `${state.count} so far` : "scroll up to load");
+  } else {
+    if (state.count > 0) {
+      setPhase("idle", "Stopped", `${state.count} captured`);
+    } else {
+      setPhase("idle", "Idle", "click Start to begin");
+    }
+  }
+  updateThread(state.threadTitle || null);
+  renderButtons();
 }
 
 function sendToTab(message, callback) {
@@ -160,22 +200,20 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!state.isInstagram) {
       setPhase("idle", "Not Instagram", "");
       els.threadName.textContent = "Open instagram.com to start";
-      els.autoScrollBtn.disabled = true;
-      els.exportBtn.disabled = true;
+      renderButtons();
       return;
     }
 
-    setPhase("idle", "Ready", "");
-    els.autoScrollBtn.disabled = false;
-
     sendToTab({ action: "GET_STATUS" }, (resp) => {
-      if (!resp) return;
-      if (resp.threadTitle) updateThread(resp.threadTitle);
-      if (resp.messageCount > 0) {
-        updateCount(resp.messageCount);
-        setPhase("capturing", "Capturing", "");
+      if (!resp) {
+        applyCaptureState(false);
+        return;
       }
-      if (resp.autoScrolling) setAutoScrollUI(true);
+      if (resp.threadTitle) updateThread(resp.threadTitle);
+      if (resp.messageCount > 0) state.count = resp.messageCount;
+      state.autoScrolling = !!resp.autoScrolling;
+      applyCaptureState(!!resp.capturing);
+      if (state.count > 0) els.msgCount.textContent = state.count;
     });
   });
 
@@ -183,19 +221,24 @@ document.addEventListener("DOMContentLoaded", () => {
     if (message.type === "IG_EXPORTER_UPDATED") {
       if (message.threadTitle) updateThread(message.threadTitle);
       updateCount(message.messageCount);
-      if (state.phase === "idle" || state.phase === "error") {
-        setPhase("capturing", "Capturing", "");
+      if (state.capturing && state.phase !== "scrolling") {
+        setPhase("capturing", "Capturing", `${message.messageCount}`);
         clearError();
       }
     }
 
+    if (message.type === "IG_EXPORTER_CAPTURE_STATE") {
+      applyCaptureState(message.capturing);
+    }
+
     if (message.type === "IG_EXPORTER_AUTOSCROLL_STATE") {
-      setAutoScrollUI(message.scrolling);
+      state.autoScrolling = message.scrolling;
       if (message.scrolling) {
         setPhase("scrolling", "Auto-scrolling", "loading history");
       } else if (state.phase === "scrolling") {
-        setPhase(state.count > 0 ? "capturing" : "idle", state.count > 0 ? "Captured" : "Ready", message.reason || "");
+        applyCaptureState(state.capturing);
       }
+      renderButtons();
     }
 
     if (message.type === "IG_EXPORTER_ERROR") {
@@ -216,15 +259,25 @@ document.addEventListener("DOMContentLoaded", () => {
           return;
         }
         setPhase("success", "Exported", `${data.messages.length} messages`);
-        els.exportBtn.disabled = false;
         els.exportBtn.textContent = "Export JSON";
+        renderButtons();
         showToast("✓ JSON downloaded");
       });
     }
   });
 
   /* ===== Buttons ===== */
+  els.captureBtn.addEventListener("click", () => {
+    clearError();
+    if (state.capturing) {
+      sendToTab({ action: "CAPTURE_STOP" });
+    } else {
+      sendToTab({ action: "CAPTURE_START" });
+    }
+  });
+
   els.exportBtn.addEventListener("click", () => {
+    if (state.count === 0) return;
     clearError();
     els.exportBtn.disabled = true;
     els.exportBtn.textContent = "Validating…";
@@ -250,9 +303,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.count > 0) {
       els.exportBtn.click();
     } else {
-      setPhase("idle", "Ready", "");
       sendToTab({ action: "GET_STATUS" }, (resp) => {
         if (resp?.messageCount > 0) updateCount(resp.messageCount);
+        applyCaptureState(!!resp?.capturing);
       });
     }
   });
@@ -264,6 +317,7 @@ document.addEventListener("DOMContentLoaded", () => {
       `URL pattern: instagram.com/direct/t/...`,
       `Phase: ${state.phase}`,
       `Captured: ${state.count}`,
+      `Capturing: ${state.capturing}`,
       `Title: ${state.lastError.title}`,
       `Body: ${state.lastError.body}`,
       state.lastError.problems?.length ? `Problems:\n${state.lastError.problems.map(p => "  - " + p).join("\n")}` : null,

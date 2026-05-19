@@ -11,6 +11,8 @@
 
   let threadCounts = {};
   let threadTitles = {};
+  let capturing = false;
+
   const autoScroll = {
     active: false,
     timer: null,
@@ -36,7 +38,6 @@
   function getActiveTitle() {
     const activeId = getActiveId();
     if (activeId && threadTitles[activeId]) return threadTitles[activeId];
-    // Fallback: highest-count thread's title (handles alias gaps)
     let best = null;
     let bestCount = -1;
     for (const [id, count] of Object.entries(threadCounts)) {
@@ -56,10 +57,26 @@
     }).catch(() => {});
   }
 
+  function broadcastCaptureState() {
+    chrome.runtime.sendMessage({
+      type: "IG_EXPORTER_CAPTURE_STATE",
+      capturing,
+    }).catch(() => {});
+  }
+
+  /* ===== Capture toggle ===== */
+  function setCapturing(on) {
+    capturing = !!on;
+    window.postMessage({ type: "IG_EXPORTER_SET_CAPTURING", capturing }, "*");
+    console.log(`[ig-exporter] Capture ${capturing ? "ON" : "OFF"}.`);
+    if (!capturing && autoScroll.active) {
+      stopAutoScroll("capture stopped");
+    }
+    broadcastCaptureState();
+  }
+
   /* ===== Auto-scroll ===== */
   function findScrollContainer() {
-    // Score every scrollable div in the main region and pick the best candidate.
-    // We deliberately don't rely on role="row" — IG removed it in recent builds.
     const root =
       document.querySelector('[role="main"]') ||
       document.querySelector("main") ||
@@ -69,22 +86,17 @@
     const divs = root.querySelectorAll("div");
 
     for (const el of divs) {
-      // Skip elements that aren't visible (display:none parents will report 0 sizes)
       if (el.clientHeight === 0) continue;
-
       const style = window.getComputedStyle(el);
       const overflowY = style.overflowY;
       if (!["auto", "scroll", "overlay"].includes(overflowY)) continue;
       if (el.scrollHeight <= el.clientHeight + 20) continue;
 
-      // Heuristic score: prefer taller containers with more media/text inside
-      // (messages contain lots of images, anchors, and text spans).
       const inner = el.innerHTML.length;
       const score =
         el.clientHeight * 2 +
         (el.scrollHeight - el.clientHeight) +
         Math.min(inner / 100, 500);
-
       candidates.push({ el, score });
     }
 
@@ -101,6 +113,17 @@
       `(scrollHeight=${winner.scrollHeight}, clientHeight=${winner.clientHeight})`
     );
     return winner;
+  }
+
+  // IG's message list uses flex-direction: column-reverse. In that layout,
+  // scrollTop=0 is the visual BOTTOM (newest). To reach the top (oldest),
+  // we need to scroll into negative scrollTop territory. Setting a large
+  // negative value works for both normal (clamped to 0) and reversed
+  // (clamped to -(scrollHeight - clientHeight)) containers.
+  function scrollToVisualTop(container) {
+    container.scrollTop = -container.scrollHeight;
+    // Fallback nudge for any nested scrollable that still wants positive 0
+    container.scrollTop = container.scrollTop; // re-read to commit
   }
 
   function announceAutoScrollState(scrolling, reason) {
@@ -125,6 +148,9 @@
 
   function startAutoScroll() {
     if (autoScroll.active) return { ok: true, alreadyRunning: true };
+    if (!capturing) {
+      return { ok: false, reason: "Start capture first, then auto-scroll." };
+    }
     const container = findScrollContainer();
     if (!container) {
       return { ok: false, reason: "No scrollable thread found. Open a DM and scroll once manually first." };
@@ -137,16 +163,15 @@
     console.log("[ig-exporter] Auto-scroll started.");
     announceAutoScrollState(true);
 
-    const TICK_MS = 700;
-    const MAX_STALL_TICKS = 8; // ~5.6s with no new messages → stop
+    const TICK_MS = 800;
+    const MAX_STALL_TICKS = 13; // ~10.4s with no new messages → stop
 
     autoScroll.timer = setInterval(() => {
       if (!autoScroll.container || !autoScroll.container.isConnected) {
         stopAutoScroll("thread container disappeared");
         return;
       }
-      // Scroll to the very top to trigger Instagram's history fetch
-      autoScroll.container.scrollTop = 0;
+      scrollToVisualTop(autoScroll.container);
 
       const current = getActiveCount();
       if (current > autoScroll.lastSeen) {
@@ -213,7 +238,20 @@
         messageCount: getActiveCount(),
         threadTitle: getActiveTitle(),
         autoScrolling: autoScroll.active,
+        capturing,
       });
+      return true;
+    }
+
+    if (message.action === "CAPTURE_START") {
+      setCapturing(true);
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.action === "CAPTURE_STOP") {
+      setCapturing(false);
+      sendResponse({ ok: true });
       return true;
     }
 
@@ -230,6 +268,5 @@
     }
   });
 
-  // Stop auto-scroll if user navigates away
   window.addEventListener("beforeunload", () => stopAutoScroll("page unload"));
 })();
