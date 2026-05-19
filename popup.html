@@ -1,242 +1,27 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Instagram Chat Exporter</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      width: 320px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-      background: linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%);
-      padding: 20px;
-    }
-
-    .container {
-      background: white;
-      border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-    }
-
-    .header {
-      text-align: center;
-      margin-bottom: 20px;
-    }
-
-    .header h1 {
-      font-size: 18px;
-      color: #262626;
-      margin-bottom: 5px;
-    }
-
-    .header p {
-      font-size: 12px;
-      color: #8e8e8e;
-    }
-
-    .status {
-      background: #fafafa;
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 15px;
-      text-align: center;
-    }
-
-    .status.error {
-      background: #ffebee;
-      color: #c62828;
-    }
-
-    .status.success {
-      background: #e8f5e9;
-      color: #2e7d32;
-    }
-
-    .status.recording {
-      background: #ffebee;
-      color: #c62828;
-      animation: pulse 1.5s infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
-    }
-
-    .status-text {
-      font-size: 13px;
-    }
-
-    .recording-indicator {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      background: #c62828;
-      border-radius: 50%;
-      margin-right: 8px;
-      animation: blink 1s infinite;
-    }
-
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
-    }
-
-    .chat-info {
-      background: #fafafa;
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 15px;
-    }
-
-    .chat-info-item {
-      display: flex;
-      justify-content: space-between;
-      font-size: 13px;
-      color: #262626;
-      margin-bottom: 8px;
-    }
-
-    .chat-info-item:last-child {
-      margin-bottom: 0;
-    }
-
-    .chat-info-label {
-      color: #8e8e8e;
-    }
-
-    .btn {
-      width: 100%;
-      padding: 12px;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      margin-bottom: 10px;
-    }
-
-    .btn:last-child {
-      margin-bottom: 0;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%);
-      color: white;
-    }
-
-    .btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(131, 58, 180, 0.4);
-    }
-
-    .btn-primary:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .btn-stop {
-      background: #c62828;
-      color: white;
-    }
-
-    .btn-stop:hover {
-      background: #b71c1c;
-    }
-
-    .btn-secondary {
-      background: #efefef;
-      color: #262626;
-    }
-
-    .btn-secondary:hover {
-      background: #dbdbdb;
-    }
-
-    .btn-secondary:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-    }
-
-    .instructions {
-      margin-top: 15px;
-      padding-top: 15px;
-      border-top: 1px solid #efefef;
-    }
-
-    .instructions h3 {
-      font-size: 12px;
-      color: #262626;
-      margin-bottom: 8px;
-    }
-
-    .instructions ol {
-      font-size: 11px;
-      color: #8e8e8e;
-      padding-left: 16px;
-    }
-
-    .instructions li {
-      margin-bottom: 4px;
-    }
-
-    .hidden {
-      display: none !important;
-    }
+    body { width: 320px; font-family: -apple-system, system-ui, sans-serif; padding: 16px; margin: 0; color: #333; }
+    h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .status { background: #f0f2f5; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; line-height: 1.5; }
+    .btn { display: block; width: 100%; padding: 10px; background: #0095f6; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-align: center; }
+    .btn:disabled { background: #b2dffc; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: #1877f2; }
+    #error { color: #ed4956; display: none; margin-top: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    .info-row { display: flex; justify-content: space-between; }
+    .label { color: #737373; }
+    .value { font-weight: 600; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>Instagram Chat Exporter</h1>
-      <p>Export your DM conversations to JSON</p>
-    </div>
-
-    <div id="status" class="status">
-      <span class="status-text">Ready to record</span>
-    </div>
-
-    <div id="chatInfo" class="chat-info hidden">
-      <div class="chat-info-item">
-        <span class="chat-info-label">Chat with:</span>
-        <span id="chatName">-</span>
-      </div>
-      <div class="chat-info-item">
-        <span class="chat-info-label">Messages captured:</span>
-        <span id="messageCount">0</span>
-      </div>
-    </div>
-
-    <!-- Initial state: Start Recording button -->
-    <button id="startBtn" class="btn btn-primary">Start Recording</button>
-
-    <!-- Recording state: Stop button -->
-    <button id="stopBtn" class="btn btn-stop hidden">Stop & Export</button>
-
-    <!-- After export: New recording button -->
-    <button id="newBtn" class="btn btn-secondary hidden">New Recording</button>
-
-    <div class="instructions">
-      <h3>How to use:</h3>
-      <ol>
-        <li>Open an Instagram chat</li>
-        <li>Click "Start Recording"</li>
-        <li>Slowly scroll from <strong>bottom to top</strong> in the chat</li>
-        <li>Click "Stop & Export" when done</li>
-      </ol>
-    </div>
+  <h2>IG Exporter</h2>
+  <div class="status">
+    <div class="info-row"><span class="label">Status:</span> <span class="value" id="statusText">Waiting...</span></div>
+    <div class="info-row"><span class="label">Messages:</span> <span class="value" id="msgCount">0</span></div>
   </div>
-
+  <button id="exportBtn" class="btn" disabled>Export JSON</button>
+  <div id="error"></div>
   <script src="popup.js"></script>
 </body>
 </html>

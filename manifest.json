@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Instagram Chat Exporter",
-  "version": "1.0.0",
-  "description": "Export Instagram direct messages to JSON format with a single click",
+  "name": "Instagram Chat Exporter v2",
+  "version": "2.0.0",
+  "description": "Export Instagram direct messages to JSON format structurally equivalent to DYI.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -26,9 +26,19 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.instagram.com/direct/*"],
-      "js": ["content.js"],
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["src/bridge.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/interceptor.js",
+        "src/normalizer.js",
+        "src/schema.js"
+      ],
+      "matches": ["https://www.instagram.com/*"]
     }
   ]
 }

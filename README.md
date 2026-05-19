@@ -1,66 +1,187 @@
-# Instagram Chat Exporter
+# IG Exporter
 
-A Chrome extension to export Instagram direct message conversations to JSON format with a single click.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/shakibbinkabir/igexporter/releases)
+[![Manifest V3](https://img.shields.io/badge/Manifest-V3-green.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+
+A vanilla-JavaScript, fully local Chrome Extension that exports a single Instagram DM thread to a JSON file structurally equivalent to Instagram's official **"Download Your Information" (DYI)** export — without waiting days for the official archive.
+
+> **No servers. No tracking. No third-party calls.** Everything runs in your browser tab.
+
+---
+
+## Why
+
+Instagram's official DYI export can take **hours to weeks** to be ready, and you only get *everything* — not just the one conversation you actually need. IG Exporter captures messages directly from Instagram's own GraphQL responses as you scroll a thread, normalizes them into the exact same shape as the DYI `message_*.json` files, and hands you a download.
+
+Useful for:
+
+- Personal backups of a single conversation
+- Forensic / discovery work on your own DMs
+- Importing one thread into tools that already understand the DYI schema
+- Anything you'd otherwise have to wait days for
+
+---
+
+## Features
+
+- **DYI-compatible schema** — drop the output into any tool that already parses Instagram's official export.
+- **Manifest V3** — no remote code, no `<all_urls>`, scoped to `instagram.com` only.
+- **Zero backend** — no analytics, no telemetry, no network calls beyond what Instagram itself makes.
+- **Captures everything visible** — text, reactions, photos, videos, audio messages, shares, and call events.
+- **Newest-first ordering** matching DYI conventions.
+- **Real display names** — `sender_name` is always the actual name, never `"You"`.
+- **Schema validation** before download — invalid exports surface the exact problem rather than silently producing garbage.
+- **Multi-thread aware** — switch between threads while the extension is running; counts are tracked per thread.
+
+---
 
 ## Installation
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable **Developer mode** (toggle in top-right corner)
-3. Click **Load unpacked**
-4. Select the `igexporter` folder
+This extension is distributed as an unpacked Chrome Extension. It is **not** on the Chrome Web Store.
+
+1. Download or clone this repository:
+   ```bash
+   git clone https://github.com/shakibbinkabir/igexporter.git
+   ```
+2. Open Chrome and navigate to `chrome://extensions/`.
+3. Toggle **Developer mode** on (top-right).
+4. Click **Load unpacked** and select the cloned `igexporter` folder.
+5. Pin the extension to your toolbar for easy access.
+
+Works in any Chromium-based browser (Chrome, Edge, Brave, Arc, Vivaldi).
+
+---
 
 ## Usage
 
-1. Go to [Instagram Direct Messages](https://www.instagram.com/direct/inbox/)
-2. Open the chat conversation you want to export
-3. Click the extension icon in your Chrome toolbar
-4. Click **Export Chat**
-5. Choose where to save the JSON file
+1. Go to <https://www.instagram.com/> and open a DM thread.
+2. **Scroll up** inside the thread to load as much history as you want exported. The extension captures messages from Instagram's own GraphQL responses as they stream in.
+3. Click the **IG Exporter** icon in your toolbar.
+4. The popup shows the live capture count for the active thread. When you're done scrolling, click **Export JSON**.
+5. The exporter validates the structure, then prompts you to save `instagram_<title>_<timestamp>.json`.
 
-## Exported Data Format
+> Tip: Instagram only loads ~20 messages per scroll. For long threads, scroll patiently until the count stops growing.
 
-The exported JSON file contains:
+---
+
+## Output Schema
+
+The output mirrors Instagram's official DYI export at the top level:
 
 ```json
 {
-  "exportDate": "2024-01-15T10:30:00.000Z",
-  "chatName": "username",
-  "participants": ["You", "username"],
-  "messageCount": 150,
+  "participants": [{ "name": "Alice" }, { "name": "Bob" }],
+  "title": "Alice",
+  "is_still_participant": true,
+  "thread_path": "inbox/alice_17841400000000000",
+  "magic_words": [],
   "messages": [
     {
-      "id": 0,
-      "content": "Message text here",
-      "sender": "You",
-      "timestamp": "2024-01-15T10:00:00.000Z",
-      "type": "text"
+      "sender_name": "Alice",
+      "timestamp_ms": 1715000000000,
+      "content": "hey",
+      "is_geoblocked_for_viewer": false,
+      "is_unsent_image_by_messenger_kid_parent": false
     }
   ]
 }
 ```
 
-## Features
+Each message may additionally include any of: `photos`, `videos`, `audio_files`, `share`, `reactions`, `call_duration`.
 
-- Export chat messages to JSON format
-- Captures text messages
-- Identifies sender (You vs. other participant)
-- Includes timestamps when available
-- Detects media messages (images/videos)
+---
+
+## Architecture
+
+```
+popup.html / popup.js          ← extension UI, triggers export & downloads file
+        │
+        ▼
+src/bridge.js                  ← content script; relays messages between page & extension
+        │
+        ▼  (injects)
+src/interceptor.js             ← runs in page context; wraps XHR + fetch
+        │
+        ▼
+Instagram GraphQL responses    ← thread metadata + message edges captured here
+        │
+        ▼
+src/normalizer.js              ← reshapes raw GraphQL into DYI schema
+        │
+        ▼
+src/schema.js                  ← validates output before download
+```
+
+- **`bridge.js`** runs as a content script. It imports `normalizer.js` and `schema.js` via ES modules and injects `interceptor.js` into the page's main world.
+- **`interceptor.js`** patches `XMLHttpRequest` and `fetch` to clone responses from `/api/graphql` and `/graphql/query`, harvesting any `slide_messages.edges` it sees and de-duplicating across thread-ID aliases.
+- **`normalizer.js`** maps the raw GraphQL shape to the DYI schema, resolving sender identity, media URLs, reactions, and shares.
+- **`schema.js`** runs a final structural check (required fields, sort order, boolean invariants) and refuses to export if the result is malformed.
+
+Nothing is sent off-device. The only network traffic is what Instagram itself initiates.
+
+---
 
 ## Limitations
 
-- Instagram's dynamic page structure may affect message extraction
-- Very old messages may require scrolling to load them first
-- Some timestamps may not be captured if Instagram doesn't display them
+These are intentional non-goals — they exist because the web client doesn't expose the equivalent data, not because they're hard:
 
-## Better Icons (Optional)
+- **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
+- **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
+- **`creation_timestamp`** on media is derived from the message timestamp when Instagram doesn't expose a separate one.
+- **Emojis are preserved natively** rather than mimicking the DYI export's well-known mojibake (`ð`) encoding.
+- **Realtime WebSocket payloads** are binary LightSpeed and are deliberately not decoded. Anything that only arrives over WebSocket without a GraphQL backfill will be missed — scroll the thread to force a GraphQL fetch.
 
-The extension comes with placeholder icons. For better icons:
-1. Open `generate-icons.html` in a browser
-2. Click "Download All Icons"
-3. Replace the files in the `icons` folder
-4. Reload the extension in Chrome
+---
 
-## Privacy
+## Privacy & Security
 
-This extension runs entirely locally. No data is sent to external servers.
+- **No remote endpoints.** Inspect `manifest.json`: the only host permission is `https://www.instagram.com/*`.
+- **No remote code.** All scripts ship in this repo — Manifest V3 forbids loading anything else.
+- **No analytics.** No pings, no error reporting, no usage stats.
+- **You control the file.** The export uses `chrome.downloads.download` with `saveAs: true` — Chrome shows the save dialog every time.
+
+If you don't trust a binary you didn't build, you shouldn't — every file here is plain readable JavaScript. Read it.
+
+---
+
+## Development
+
+The project is intentionally toolchain-free. There is **no build step, no bundler, no `npm install`**. Edit a `.js` file, hit reload on the extension card in `chrome://extensions/`, and you're done.
+
+Layout:
+
+```
+igexporter/
+├── manifest.json          # MV3 manifest
+├── popup.html / popup.js  # toolbar UI
+├── src/
+│   ├── bridge.js          # content script (isolated world)
+│   ├── interceptor.js     # page-world XHR/fetch hook
+│   ├── normalizer.js      # raw → DYI shape
+│   └── schema.js          # output validator
+└── icons/
+```
+
+### Contributing
+
+Issues and PRs welcome. Good first contributions:
+
+- More content types in `normalizer.js` (stickers, polls, story replies)
+- Tighter validation in `schema.js`
+- Better thread-title fallbacks for group chats
+- A Firefox port (the codebase is already MV3-compatible)
+
+Please keep the project dependency-free. The whole point is that a privacy-sensitive user can read every line before installing.
+
+---
+
+## License
+
+[MIT](LICENSE) © Shakib Bin Kabir
+
+---
+
+## Disclaimer
+
+This project is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. or Instagram. "Instagram" is a trademark of its respective owner. Use of this extension is subject to Instagram's Terms of Service. You are responsible for the content you export and how you use it.

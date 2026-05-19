@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Node (if anyone scaffolds tooling later)
+node_modules/
+npm-debug.log*
+
+# Build / packaging artifacts
+*.zip
+*.crx
+*.pem
+dist/
+
+# Local captures / dumps used during development
+xhr*_dump.json
+probe-capture-*.json
