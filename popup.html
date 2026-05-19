@@ -1,27 +1,387 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8" />
   <style>
-    body { width: 320px; font-family: -apple-system, system-ui, sans-serif; padding: 16px; margin: 0; color: #333; }
-    h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-    .status { background: #f0f2f5; padding: 12px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; line-height: 1.5; }
-    .btn { display: block; width: 100%; padding: 10px; background: #0095f6; color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-align: center; }
-    .btn:disabled { background: #b2dffc; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { background: #1877f2; }
-    #error { color: #ed4956; display: none; margin-top: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
-    .info-row { display: flex; justify-content: space-between; }
-    .label { color: #737373; }
-    .value { font-weight: 600; }
+    :root {
+      --bg: #0a0a0b;
+      --bg-card: #131316;
+      --bg-card-hover: #18181c;
+      --border: #25252b;
+      --border-strong: #34343c;
+      --text: #ececf1;
+      --text-dim: #8a8a93;
+      --text-faint: #5a5a63;
+      --accent: #0095f6;
+      --accent-hot: #1aa3ff;
+      --accent-glow: rgba(0, 149, 246, 0.45);
+      --danger: #ff5470;
+      --danger-bg: rgba(255, 84, 112, 0.08);
+      --success: #34d399;
+      --warning: #fbbf24;
+      --radius: 10px;
+      --radius-sm: 6px;
+      --transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      width: 340px;
+      margin: 0;
+      padding: 18px 16px 16px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      line-height: 1.4;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ===== Header ===== */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .logo-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent-glow);
+      animation: breathe 2.4s ease-in-out infinite;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: 0.55; transform: scale(0.85); }
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      flex: 1;
+    }
+    .version {
+      font-size: 10px;
+      color: var(--text-faint);
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+
+    /* ===== Status card ===== */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 12px;
+      transition: border-color var(--transition);
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-faint);
+      flex-shrink: 0;
+      transition: background var(--transition), box-shadow var(--transition);
+    }
+    .status-dot[data-state="capturing"],
+    .status-dot[data-state="scrolling"] {
+      background: var(--accent);
+      box-shadow: 0 0 0 0 var(--accent-glow);
+      animation: pulse 1.6s ease-out infinite;
+    }
+    .status-dot[data-state="success"] { background: var(--success); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
+    .status-dot[data-state="error"]   { background: var(--danger);  box-shadow: 0 0 6px rgba(255, 84, 112, 0.5); }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 var(--accent-glow); }
+      70%  { box-shadow: 0 0 0 6px rgba(0, 149, 246, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(0, 149, 246, 0); }
+    }
+    .status-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .status-label .sub {
+      color: var(--text-dim);
+      font-weight: 400;
+      margin-left: 4px;
+    }
+
+    .thread-name {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .thread-name::before {
+      content: "↳ ";
+      color: var(--text-faint);
+    }
+
+    .count-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .count {
+      font-size: 26px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      transition: color var(--transition);
+    }
+    .count.bumping { color: var(--accent-hot); }
+    .count-label {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .progress {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-fill {
+      position: absolute;
+      inset: 0;
+      width: 30%;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      transform: translateX(-100%);
+      opacity: 0;
+      transition: opacity var(--transition);
+    }
+    .progress.active .progress-fill {
+      opacity: 1;
+      animation: slide 1.4s linear infinite;
+    }
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+
+    /* ===== Actions ===== */
+    .actions {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px;
+    }
+    button {
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      padding: 10px 14px;
+      transition: all var(--transition);
+      letter-spacing: -0.005em;
+    }
+    button:disabled { cursor: not-allowed; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      box-shadow: 0 0 0 1px rgba(0, 149, 246, 0.3), 0 4px 12px var(--accent-glow);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-hot);
+      box-shadow: 0 0 0 1px rgba(26, 163, 255, 0.5), 0 6px 16px var(--accent-glow);
+      transform: translateY(-1px);
+    }
+    .btn-primary:active:not(:disabled) { transform: translateY(0); }
+    .btn-primary:disabled {
+      background: #1d2e3a;
+      color: #4a6478;
+      box-shadow: none;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      padding: 10px 12px;
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--bg-card-hover);
+      border-color: var(--text-faint);
+    }
+    .btn-secondary.active {
+      background: rgba(0, 149, 246, 0.1);
+      border-color: var(--accent);
+      color: var(--accent-hot);
+    }
+    .btn-secondary:disabled { color: var(--text-faint); border-color: var(--border); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-dim);
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover:not(:disabled) {
+      color: var(--text);
+      background: var(--bg-card-hover);
+    }
+
+    /* ===== Error card ===== */
+    .error-card {
+      margin-top: 12px;
+      background: var(--danger-bg);
+      border: 1px solid rgba(255, 84, 112, 0.25);
+      border-radius: var(--radius);
+      padding: 12px;
+    }
+    .error-card[hidden] { display: none; }
+    .error-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .error-icon {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--danger);
+      color: var(--bg);
+      font-size: 11px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .error-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--danger);
+    }
+    .error-body {
+      font-size: 11px;
+      color: var(--text);
+      margin-bottom: 6px;
+      word-break: break-word;
+    }
+    .error-hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+      padding-left: 8px;
+      border-left: 2px solid var(--border-strong);
+    }
+    .error-hint:empty { display: none; }
+    .error-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    /* ===== Footer ===== */
+    .footer {
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--text-faint);
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
+    .footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+    }
+    .footer a:hover { color: var(--text); }
+
+    /* ===== Toast ===== */
+    .toast {
+      position: fixed;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--text);
+      color: var(--bg);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 200ms ease;
+      z-index: 10;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   </style>
 </head>
 <body>
-  <h2>IG Exporter</h2>
-  <div class="status">
-    <div class="info-row"><span class="label">Status:</span> <span class="value" id="statusText">Waiting...</span></div>
-    <div class="info-row"><span class="label">Messages:</span> <span class="value" id="msgCount">0</span></div>
+  <div class="header">
+    <span class="logo-dot"></span>
+    <span class="title">IG Exporter</span>
+    <span class="version">v2.0</span>
   </div>
-  <button id="exportBtn" class="btn" disabled>Export JSON</button>
-  <div id="error"></div>
+
+  <div class="card">
+    <div class="status-row">
+      <span class="status-dot" id="statusDot" data-state="idle"></span>
+      <span class="status-label" id="statusText">Waiting<span class="sub" id="statusSub"></span></span>
+    </div>
+    <div class="thread-name" id="threadName">No thread detected</div>
+    <div class="count-row">
+      <span class="count" id="msgCount">0</span>
+      <span class="count-label">captured</span>
+    </div>
+    <div class="progress" id="progress">
+      <div class="progress-fill"></div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="autoScrollBtn" class="btn-secondary" disabled title="Auto-scroll the thread to load more history">
+      <span id="autoScrollLabel">Auto-scroll</span>
+    </button>
+    <button id="exportBtn" class="btn-primary" disabled>Export JSON</button>
+  </div>
+
+  <div id="errorCard" class="error-card" hidden>
+    <div class="error-header">
+      <span class="error-icon">!</span>
+      <span class="error-title" id="errorTitle">Something went wrong</span>
+    </div>
+    <div class="error-body" id="errorBody"></div>
+    <div class="error-hint" id="errorHint"></div>
+    <div class="error-actions">
+      <button id="retryBtn" class="btn-ghost">Retry</button>
+      <button id="copyErrBtn" class="btn-ghost">Copy details</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a href="https://github.com/shakibbinkabir/igexporter" target="_blank" rel="noopener">github.com/shakibbinkabir/igexporter</a>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
   <script src="popup.js"></script>
 </body>
 </html>
