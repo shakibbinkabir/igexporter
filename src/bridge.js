@@ -10,6 +10,7 @@
   (document.head || document.documentElement).appendChild(script);
 
   let threadCounts = {};
+  let threadTitles = {};
   const autoScroll = {
     active: false,
     timer: null,
@@ -32,70 +33,74 @@
     return 0;
   }
 
-  /* ===== Thread title detection ===== */
-  function detectThreadTitle() {
-    // Strategy: find the page header inside the DM layout.
-    // IG renders the thread name inside an <h1> or <header> at the top of the conversation.
-    const candidates = [
-      document.querySelector('section header h1'),
-      document.querySelector('header h1'),
-      document.querySelector('[role="main"] header [dir="auto"]'),
-      document.querySelector('[role="main"] header'),
-    ].filter(Boolean);
-
-    for (const el of candidates) {
-      const text = (el.innerText || el.textContent || "").trim();
-      if (!text) continue;
-      // Skip obvious nav labels
-      if (/^(Direct|Inbox|Messages?|Requests)$/i.test(text)) continue;
-      // Take first line only
-      const firstLine = text.split("\n")[0].trim();
-      if (firstLine.length > 0 && firstLine.length < 120) return firstLine;
+  function getActiveTitle() {
+    const activeId = getActiveId();
+    if (activeId && threadTitles[activeId]) return threadTitles[activeId];
+    // Fallback: highest-count thread's title (handles alias gaps)
+    let best = null;
+    let bestCount = -1;
+    for (const [id, count] of Object.entries(threadCounts)) {
+      if (count > bestCount && threadTitles[id]) {
+        best = threadTitles[id];
+        bestCount = count;
+      }
     }
-    return null;
+    return best;
   }
 
   function broadcastUpdate(count) {
     chrome.runtime.sendMessage({
       type: "IG_EXPORTER_UPDATED",
       messageCount: count,
-      threadTitle: detectThreadTitle(),
+      threadTitle: getActiveTitle(),
     }).catch(() => {});
   }
 
   /* ===== Auto-scroll ===== */
   function findScrollContainer() {
-    // Look for the scrollable parent that contains the message rows.
-    const sampleRow =
-      document.querySelector('div[role="row"]') ||
-      document.querySelector('[data-testid*="message"]') ||
-      document.querySelector('[role="listbox"] > div');
+    // Score every scrollable div in the main region and pick the best candidate.
+    // We deliberately don't rely on role="row" — IG removed it in recent builds.
+    const root =
+      document.querySelector('[role="main"]') ||
+      document.querySelector("main") ||
+      document.body;
 
-    let node = sampleRow;
-    while (node && node !== document.body) {
-      const style = window.getComputedStyle(node);
+    const candidates = [];
+    const divs = root.querySelectorAll("div");
+
+    for (const el of divs) {
+      // Skip elements that aren't visible (display:none parents will report 0 sizes)
+      if (el.clientHeight === 0) continue;
+
+      const style = window.getComputedStyle(el);
       const overflowY = style.overflowY;
-      const canScroll = overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
-      if (canScroll && node.scrollHeight > node.clientHeight + 10) {
-        return node;
-      }
-      node = node.parentElement;
+      if (!["auto", "scroll", "overlay"].includes(overflowY)) continue;
+      if (el.scrollHeight <= el.clientHeight + 20) continue;
+
+      // Heuristic score: prefer taller containers with more media/text inside
+      // (messages contain lots of images, anchors, and text spans).
+      const inner = el.innerHTML.length;
+      const score =
+        el.clientHeight * 2 +
+        (el.scrollHeight - el.clientHeight) +
+        Math.min(inner / 100, 500);
+
+      candidates.push({ el, score });
     }
 
-    // Fallback: among all scrollable divs, pick the one with the most descendant rows.
-    let best = null;
-    let bestRows = 0;
-    document.querySelectorAll("div").forEach((el) => {
-      const style = window.getComputedStyle(el);
-      if (!["auto", "scroll", "overlay"].includes(style.overflowY)) return;
-      if (el.scrollHeight <= el.clientHeight + 10) return;
-      const rows = el.querySelectorAll('[role="row"]').length;
-      if (rows > bestRows) {
-        best = el;
-        bestRows = rows;
-      }
-    });
-    return best;
+    if (candidates.length === 0) {
+      console.warn("[ig-exporter] No scrollable candidates found.");
+      return null;
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    const winner = candidates[0].el;
+    console.log(
+      `[ig-exporter] Auto-scroll container picked from ${candidates.length} candidates:`,
+      winner,
+      `(scrollHeight=${winner.scrollHeight}, clientHeight=${winner.clientHeight})`
+    );
+    return winner;
   }
 
   function announceAutoScrollState(scrolling, reason) {
@@ -164,6 +169,7 @@
 
     if (event.data?.type === "IG_EXPORTER_UPDATED") {
       threadCounts = event.data.counts || {};
+      threadTitles = event.data.titles || {};
       const activeId = getActiveId() || event.data.latestId;
       const count = threadCounts[activeId] || 0;
       broadcastUpdate(count);
@@ -205,7 +211,7 @@
     if (message.action === "GET_STATUS") {
       sendResponse({
         messageCount: getActiveCount(),
-        threadTitle: detectThreadTitle(),
+        threadTitle: getActiveTitle(),
         autoScrolling: autoScroll.active,
       });
       return true;

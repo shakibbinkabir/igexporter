@@ -79,15 +79,24 @@ function updateCount(newCount) {
   animateCount(old, newCount);
   if (newCount > 0) {
     els.exportBtn.disabled = false;
+    // Refresh thread label so the "No thread captured yet" fallback updates
+    if (!state.threadTitle) updateThread(null);
   }
 }
 
 function updateThread(title) {
-  if (title && title !== state.threadTitle) {
-    state.threadTitle = title;
-    els.threadName.textContent = title;
-  } else if (!title) {
-    els.threadName.textContent = "No thread detected";
+  if (title) {
+    if (title !== state.threadTitle) {
+      state.threadTitle = title;
+      els.threadName.textContent = title;
+    }
+    return;
+  }
+  // No title yet — distinguish "we have data but no name" from "nothing captured"
+  if (state.count > 0) {
+    els.threadName.textContent = "Active thread";
+  } else {
+    els.threadName.textContent = "No thread captured yet";
   }
 }
 

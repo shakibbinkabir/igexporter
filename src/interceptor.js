@@ -180,20 +180,39 @@
 
     if (threadsToProcess.length > 0) {
       const threadCounts = {};
+      const threadTitles = {};
+
+      function titleFor(store) {
+        const info = store?.threadInfo;
+        if (!info) return null;
+        if (info.thread_title) return info.thread_title;
+        const users = info.users || [];
+        for (const u of users) {
+          const name = u.full_name || u.username;
+          if (name) return name;
+        }
+        return null;
+      }
+
       for (const [key, store] of window._igExporterStore.threads.entries()) {
         threadCounts[key] = store.messages.size;
+        const t = titleFor(store);
+        if (t) threadTitles[key] = t;
       }
 
       for (const [alias, canonical] of window._igExporterStore.aliases.entries()) {
         const store = window._igExporterStore.threads.get(canonical);
         if (store) {
           threadCounts[alias] = store.messages.size;
+          const t = titleFor(store);
+          if (t) threadTitles[alias] = t;
         }
       }
 
       window.postMessage({
         type: 'IG_EXPORTER_UPDATED',
         counts: threadCounts,
+        titles: threadTitles,
         latestId: window._igExporterStore.latestUpdatedId
       }, '*');
     }
