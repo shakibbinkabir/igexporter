@@ -1,8 +1,14 @@
-# IG Exporter
+<p align="center">
+  <img src="icons/icon256.png" width="128" alt="IG Exporter" />
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/shakibbinkabir/igexporter/releases)
-[![Manifest V3](https://img.shields.io/badge/Manifest-V3-green.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+<h1 align="center">IG Exporter</h1>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-2.1.1-blue.svg" alt="Version" /></a>
+  <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
+</p>
 
 A vanilla-JavaScript, fully local Chrome Extension that exports a single Instagram DM thread to a JSON file structurally equivalent to Instagram's official **"Download Your Information" (DYI)** export — without waiting days for the official archive.
 
