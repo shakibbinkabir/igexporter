@@ -50,6 +50,9 @@
   }
 
   function broadcastUpdate(count) {
+    // Only forward to popup when capture is active. The interceptor still
+    // stores responses in the background so we don't lose any messages.
+    if (!capturing) return;
     chrome.runtime.sendMessage({
       type: "IG_EXPORTER_UPDATED",
       messageCount: count,
@@ -66,13 +69,18 @@
 
   /* ===== Capture toggle ===== */
   function setCapturing(on) {
+    const wasCapturing = capturing;
     capturing = !!on;
-    window.postMessage({ type: "IG_EXPORTER_SET_CAPTURING", capturing }, "*");
     console.log(`[ig-exporter] Capture ${capturing ? "ON" : "OFF"}.`);
     if (!capturing && autoScroll.active) {
       stopAutoScroll("capture stopped");
     }
     broadcastCaptureState();
+    // On Start: surface whatever was already collected so the user sees
+    // the existing message count instead of a misleading 0.
+    if (capturing && !wasCapturing) {
+      broadcastUpdate(getActiveCount());
+    }
   }
 
   /* ===== Auto-scroll ===== */

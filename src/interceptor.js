@@ -8,12 +8,6 @@
     latestUpdatedId: null
   };
 
-  // Default OFF — user must click "Start Capture" in the popup before any
-  // GraphQL responses are processed and stored.
-  if (typeof window._igExporterCapturing !== 'boolean') {
-    window._igExporterCapturing = false;
-  }
-
   /* ===== Exportable filter (mirrors normalizer.js logic) ===== */
   function getXmaMediaUrl(xma) {
     return (
@@ -159,7 +153,10 @@
   }
 
   function processGraphQLResponse(payload) {
-    if (!window._igExporterCapturing) return;
+    // Always parse and store. The bridge decides whether to forward updates
+    // to the popup — that way, clicking "Start Capture" can immediately show
+    // any messages that Instagram already loaded before the user opened the
+    // popup, instead of waiting for the next scroll to trigger a new fetch.
     const data = typeof payload === 'string' ? tryParseJSON(payload) : payload;
     if (!data || typeof data !== 'object') return;
 
@@ -314,16 +311,10 @@
 
   interceptXHR();
   interceptFetch();
-  console.log('[ig-exporter] Interceptor installed (idle — waiting for Start Capture).');
+  console.log('[ig-exporter] Interceptor installed.');
 
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
-
-    if (event.data?.type === 'IG_EXPORTER_SET_CAPTURING') {
-      window._igExporterCapturing = !!event.data.capturing;
-      console.log(`[ig-exporter] Capture ${window._igExporterCapturing ? 'STARTED' : 'STOPPED'}.`);
-      return;
-    }
 
     if (event.data?.type === 'IG_EXPORTER_GET_STORE') {
       const activeId = event.data.activeId || window._igExporterStore.latestUpdatedId;
