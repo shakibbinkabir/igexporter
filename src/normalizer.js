@@ -68,6 +68,53 @@ function getMediaUrlFromNode(node) {
   );
 }
 
+// IG's web client delivers system-generated rows (call events, theme changes,
+// member adds, etc.) as content_type: "TEXT" with text_body: null and the
+// actual description in content.text_fragments under __typename:
+// "SlideMessageAdminText". These helpers detect that shape.
+function isSlideAdminText(node) {
+  const t = node.content?.__typename || node.content?.__isSlideMessageContent;
+  return t === 'SlideMessageAdminText';
+}
+
+function getSlideAdminText(node) {
+  const fragments = node.content?.text_fragments;
+  if (!Array.isArray(fragments)) return '';
+  return fragments.map(f => f?.plaintext || '').join('');
+}
+
+// Returns a non-negative number if this node represents a call event,
+// otherwise null. In practice IG delivers calls as SlideMessageAdminText
+// rows with plaintext like "Started an audio call" / "You missed a video
+// call" / "Audio call ended". We also keep speculative branches for older
+// XMA-based and ACTION_LOG-based shapes that may appear in other IG
+// versions. NOTE: interceptor.js mirrors this check in isExportable(); keep
+// both in sync when adjusting the patterns.
+function getCallEventDuration(node) {
+  if (typeof node.call_duration === 'number') return node.call_duration;
+
+  const xma = node.content?.xma;
+  if (xma && typeof xma.call_duration === 'number') return xma.call_duration;
+
+  const ct = (node.content_type || '').toUpperCase();
+  if (/CALL/.test(ct)) return 0;
+
+  const xmaTypename = xma?.__typename || xma?.xma_layout_type || '';
+  if (/call/i.test(xmaTypename)) return 0;
+
+  if (isSlideAdminText(node)) {
+    const text = getSlideAdminText(node).toLowerCase();
+    // IG sends a "Started/Missed an audio call" admin row when the call
+    // happens AND a separate "Audio call ended" row when it finishes. DYI
+    // emits one call_duration row per call, so keep the start/miss events
+    // (which carry the actor + initiating timestamp) and drop the "ended"
+    // tail which is redundant.
+    if (/\bcall\b/.test(text) && !/\bended\b/.test(text)) return 0;
+  }
+
+  return null;
+}
+
 export function normalizeThreadInfo(rawThread) {
   const viewerName = getViewerName(rawThread);
   const participants = [
@@ -93,17 +140,38 @@ export function normalizeMessage(node, threadInfo) {
   const otherName = getOtherParticipantName(threadInfo, viewerName);
   const fromViewer = isViewerSender(node, threadInfo, viewerName);
 
+  const tsRaw = node.timestamp_ms;
+  const timestamp_ms = typeof tsRaw === 'number' ? tsRaw : parseInt(tsRaw || '0', 10);
+  if (!Number.isFinite(timestamp_ms) || timestamp_ms <= 0) return null;
+
+  const contentType = node.content_type;
+  const xma = node.content?.xma;
+  const mediaUrl = getMediaUrlFromNode(node);
+  const callDuration = getCallEventDuration(node);
+
+  // REACTION_LOG_XMAT is always noise (it's the "X reacted ❤" system message;
+  // we already attach reactions inline to the original message).
+  if (contentType === 'REACTION_LOG_XMAT') return null;
+
   const msg = {
-    sender_name: node.sender?.user_dict?.full_name || node.sender?.name || 'Unknown',
-    timestamp_ms: parseInt(node.timestamp_ms || node.id || '0', 10),
+    sender_name:
+      node.sender?.user_dict?.full_name ||
+      node.sender?.name ||
+      (fromViewer ? viewerName : otherName) ||
+      'Unknown',
+    timestamp_ms,
     is_geoblocked_for_viewer: false,
     is_unsent_image_by_messenger_kid_parent: false
   };
 
-  if (typeof node.text_body === 'string' && node.text_body.trim().length > 0) {
-    msg.content = node.text_body;
-  } else if (typeof node.igd_snippet === 'string' && node.igd_snippet.trim().length > 0) {
-    msg.content = node.igd_snippet;
+  if (callDuration === null) {
+    // Only set content for non-call rows; the action-log description on a call
+    // node (e.g. "Started an audio call") is not part of the DYI call shape.
+    if (typeof node.text_body === 'string' && node.text_body.trim().length > 0) {
+      msg.content = node.text_body;
+    } else if (typeof node.igd_snippet === 'string' && node.igd_snippet.trim().length > 0) {
+      msg.content = node.igd_snippet;
+    }
   }
 
   if (node.reactions && Array.isArray(node.reactions) && node.reactions.length > 0) {
@@ -116,11 +184,15 @@ export function normalizeMessage(node, threadInfo) {
     });
   }
 
-  const contentType = node.content_type;
-  const xma = node.content?.xma;
-  const mediaUrl = getMediaUrlFromNode(node);
-
-  if (contentType === 'IMAGES' && mediaUrl) {
+  if (callDuration !== null) {
+    msg.call_duration = callDuration;
+  } else if (isSlideAdminText(node)) {
+    // Non-call admin-text rows (theme changed, polls, etc.) aren't part of
+    // the DYI export.
+    return null;
+  } else if (contentType === 'ACTION_LOG' || contentType === 'IgDirectThreadActionLogXPItem') {
+    return null;
+  } else if (contentType === 'IMAGES' && mediaUrl) {
     msg.photos = [{ uri: mediaUrl, creation_timestamp: Math.floor(msg.timestamp_ms / 1000) }];
   } else if (contentType === 'VIDEOS' && mediaUrl) {
     msg.videos = [{ uri: mediaUrl, creation_timestamp: Math.floor(msg.timestamp_ms / 1000) }];
@@ -132,8 +204,6 @@ export function normalizeMessage(node, threadInfo) {
       share_text: xma?.header_title_text || xma?.xmaHeaderTitle || '',
       original_content_owner: '' // Not explicitly in findings
     };
-  } else if (node.content_type === 'REACTION_LOG_XMAT' || node.content_type === 'ACTION_LOG' || node.content_type === 'IgDirectThreadActionLogXPItem') {
-    return null; // Skip this event
   }
 
   const hasPayload = !!(
@@ -142,7 +212,7 @@ export function normalizeMessage(node, threadInfo) {
     msg.videos ||
     msg.audio_files ||
     msg.share ||
-    msg.call_duration ||
+    'call_duration' in msg || // 0 is valid (missed/declined call)
     (msg.reactions && msg.reactions.length > 0)
   );
 

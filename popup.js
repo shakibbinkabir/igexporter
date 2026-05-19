@@ -35,6 +35,7 @@ const HINTS = {
   no_messages: "Click Start Capture, then scroll up inside the thread to load history.",
   validation: "The data Instagram returned didn't match the expected shape. Try refreshing the page and capturing again.",
   download: "Chrome blocked the download. Check your download settings or try again.",
+  bridge: "Press F5 on the Instagram tab, then reopen this popup.",
   unknown: "Try refreshing the Instagram tab, then reopen this popup.",
 };
 
@@ -131,6 +132,7 @@ function updateThread(title) {
 
 function classifyError(msg, problems) {
   const m = (msg || "").toLowerCase();
+  if (m.includes("bridge") || m.includes("refresh")) return "bridge";
   if (m.includes("no thread") || m.includes("not captured")) return "no_messages";
   if (m.includes("validation") || (problems && problems.length)) return "validation";
   if (m.includes("download")) return "download";
@@ -182,7 +184,10 @@ function sendToTab(message, callback) {
   if (!state.tabId) return;
   chrome.tabs.sendMessage(state.tabId, message, (resp) => {
     if (chrome.runtime.lastError) {
-      console.warn("[popup] tab message failed:", chrome.runtime.lastError.message);
+      // Always invoke the callback so the popup can react (with null) instead
+      // of waiting forever. This happens when the content script in the tab is
+      // stale (after the extension was reloaded but the IG tab wasn't).
+      callback?.(null);
       return;
     }
     callback?.(resp);
@@ -204,9 +209,16 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Paint defaults up front so the UI never sits at the raw HTML state
+    // (e.g. when the content script in the tab is stale and never replies).
+    applyCaptureState(false);
+
     sendToTab({ action: "GET_STATUS" }, (resp) => {
       if (!resp) {
-        applyCaptureState(false);
+        showError(
+          "Bridge not responding",
+          "The Instagram tab needs to be refreshed (the extension was reloaded after the page was open)."
+        );
         return;
       }
       if (resp.threadTitle) updateThread(resp.threadTitle);
@@ -313,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
   els.copyErrBtn.addEventListener("click", async () => {
     if (!state.lastError) return;
     const payload = [
-      `IG Exporter v2.1.1 — error report`,
+      `IG Exporter v2.2.1 — error report`,
       `URL pattern: instagram.com/direct/t/...`,
       `Phase: ${state.phase}`,
       `Captured: ${state.count}`,

@@ -8,7 +8,15 @@
     latestUpdatedId: null
   };
 
-  /* ===== Exportable filter (mirrors normalizer.js logic) ===== */
+  /* ===== Exportable filter =====
+     This block mirrors the classification rules in src/normalizer.js. The two
+     copies exist because interceptor.js runs in the page world (injected via
+     <script>) while normalizer.js is an ES module loaded by bridge.js in the
+     isolated content-script world — they can't share imports. The popup count
+     comes from isExportable() here; the export itself comes from normalizer.
+     If they drift, the popup count and the exported message list disagree.
+     ANY new content_type added in normalizer.normalizeMessage MUST be added
+     here too (and vice versa). */
   function getXmaMediaUrl(xma) {
     return (
       xma?.preview_image?.url ||
@@ -32,12 +40,37 @@
       null
     );
   }
+  function isSlideAdminText(node) {
+    const t = node.content?.__typename || node.content?.__isSlideMessageContent;
+    return t === 'SlideMessageAdminText';
+  }
+  function getSlideAdminText(node) {
+    const fragments = node.content?.text_fragments;
+    if (!Array.isArray(fragments)) return '';
+    return fragments.map(function (f) { return f && f.plaintext || ''; }).join('');
+  }
+  function isCallEvent(node) {
+    if (typeof node.call_duration === 'number') return true;
+    const xma = node.content?.xma;
+    if (xma && typeof xma.call_duration === 'number') return true;
+    const ct = (node.content_type || '').toUpperCase();
+    if (/CALL/.test(ct)) return true;
+    const xmaTypename = xma?.__typename || xma?.xma_layout_type || '';
+    if (/call/i.test(xmaTypename)) return true;
+    if (isSlideAdminText(node)) {
+      const text = getSlideAdminText(node).toLowerCase();
+      if (/\bcall\b/.test(text) && !/\bended\b/.test(text)) return true;
+    }
+    return false;
+  }
   function isExportable(node) {
     if (!node) return false;
     const ct = node.content_type;
-    if (ct === 'REACTION_LOG_XMAT' || ct === 'ACTION_LOG' || ct === 'IgDirectThreadActionLogXPItem') {
-      return false;
-    }
+    if (ct === 'REACTION_LOG_XMAT') return false;
+    if (isCallEvent(node)) return true;
+    // Non-call admin texts and action-log entries are noise.
+    if (isSlideAdminText(node)) return false;
+    if (ct === 'ACTION_LOG' || ct === 'IgDirectThreadActionLogXPItem') return false;
     if ((typeof node.text_body === 'string' && node.text_body.trim()) ||
         (typeof node.igd_snippet === 'string' && node.igd_snippet.trim())) {
       return true;
@@ -311,7 +344,6 @@
 
   interceptXHR();
   interceptFetch();
-  console.log('[ig-exporter] Interceptor installed.');
 
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;

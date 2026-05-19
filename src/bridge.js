@@ -71,7 +71,6 @@
   function setCapturing(on) {
     const wasCapturing = capturing;
     capturing = !!on;
-    console.log(`[ig-exporter] Capture ${capturing ? "ON" : "OFF"}.`);
     if (!capturing && autoScroll.active) {
       stopAutoScroll("capture stopped");
     }
@@ -108,19 +107,10 @@
       candidates.push({ el, score });
     }
 
-    if (candidates.length === 0) {
-      console.warn("[ig-exporter] No scrollable candidates found.");
-      return null;
-    }
+    if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.score - a.score);
-    const winner = candidates[0].el;
-    console.log(
-      `[ig-exporter] Auto-scroll container picked from ${candidates.length} candidates:`,
-      winner,
-      `(scrollHeight=${winner.scrollHeight}, clientHeight=${winner.clientHeight})`
-    );
-    return winner;
+    return candidates[0].el;
   }
 
   // IG's message list uses flex-direction: column-reverse. In that layout,
@@ -130,8 +120,6 @@
   // (clamped to -(scrollHeight - clientHeight)) containers.
   function scrollToVisualTop(container) {
     container.scrollTop = -container.scrollHeight;
-    // Fallback nudge for any nested scrollable that still wants positive 0
-    container.scrollTop = container.scrollTop; // re-read to commit
   }
 
   function announceAutoScrollState(scrolling, reason) {
@@ -150,7 +138,6 @@
     autoScroll.stallCount = 0;
     autoScroll.lastSeen = -1;
     autoScroll.container = null;
-    console.log(`[ig-exporter] Auto-scroll stopped: ${reason || "manual"}`);
     announceAutoScrollState(false, reason);
   }
 
@@ -168,7 +155,6 @@
     autoScroll.lastSeen = getActiveCount();
     autoScroll.stallCount = 0;
 
-    console.log("[ig-exporter] Auto-scroll started.");
     announceAutoScrollState(true);
 
     const TICK_MS = 800;
@@ -211,9 +197,10 @@
     if (event.data?.type === "IG_EXPORTER_STORE_RESPONSE") {
       const store = event.data;
       if (!store.threadInfo) {
-        const error = "No thread data captured yet. Open a thread and scroll.";
-        console.error(`[ig-exporter] ${error}`);
-        chrome.runtime.sendMessage({ type: "IG_EXPORTER_ERROR", error });
+        chrome.runtime.sendMessage({
+          type: "IG_EXPORTER_ERROR",
+          error: "No thread data captured yet. Open a thread and scroll.",
+        });
         return;
       }
 
@@ -221,14 +208,12 @@
       const problems = validate(result);
 
       if (problems.length > 0) {
-        console.error("[ig-exporter] Validation failed:", problems);
         chrome.runtime.sendMessage({
           type: "IG_EXPORTER_ERROR",
           error: "Validation failed",
           problems,
         });
       } else {
-        console.log("[ig-exporter] Export valid.");
         chrome.runtime.sendMessage({ type: "IG_EXPORTER_SUCCESS", result });
       }
     }

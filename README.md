@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-2.1.1-blue.svg" alt="Version" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-2.2.1-blue.svg" alt="Version" /></a>
   <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
 </p>
 
@@ -135,6 +135,7 @@ These are intentional non-goals — they exist because the web client doesn't ex
 - **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
 - **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
 - **`creation_timestamp`** on media is derived from the message timestamp when Instagram doesn't expose a separate one.
+- **Call events are emitted as `call_duration: 0`**. IG's web client surfaces calls as admin-text rows ("Started an audio call", "You missed a video call") without exposing the actual seconds the call lasted, so each call becomes one row but the real duration isn't filled in the way DYI does.
 - **Emojis are preserved natively** rather than mimicking the DYI export's well-known mojibake (`ð`) encoding.
 - **Realtime WebSocket payloads** are binary LightSpeed and are deliberately not decoded. Anything that only arrives over WebSocket without a GraphQL backfill will be missed — scroll the thread to force a GraphQL fetch.
 
