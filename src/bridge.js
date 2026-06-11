@@ -1,17 +1,35 @@
 // src/bridge.js
-(async function () {
+(function () {
   const srcURL = chrome.runtime.getURL("src/");
-  const { normalize } = await import(srcURL + "normalizer.js");
-  const { validate } = await import(srcURL + "schema.js");
 
-  // Inject interceptor into page world
+  // Inject the interceptor into the page world FIRST, then register the popup
+  // listeners synchronously below. Capturing and status reporting must NOT be
+  // gated behind the dynamic module import: that import can be slow on a cold
+  // start (opening a window where the popup's GET_STATUS finds no listener and
+  // shows "Bridge not responding") or fail outright under a strict page CSP.
+  // Only the final EXPORT needs normalizer/schema, so those load lazily.
   const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("src/interceptor.js");
+  script.src = srcURL + "interceptor.js";
   (document.head || document.documentElement).appendChild(script);
+
+  // Lazily-loaded export helpers — imported on the first export request so a
+  // slow or blocked import can never delay capture/status or orphan the popup.
+  let exportLib = null;
+  async function getExportLib() {
+    if (!exportLib) {
+      const [{ normalize }, { validate }] = await Promise.all([
+        import(srcURL + "normalizer.js"),
+        import(srcURL + "schema.js"),
+      ]);
+      exportLib = { normalize, validate };
+    }
+    return exportLib;
+  }
 
   let threadCounts = {};
   let threadTitles = {};
   let capturing = false;
+  let latestId = null;
 
   const autoScroll = {
     active: false,
@@ -26,18 +44,37 @@
     return match ? match[1] : null;
   }
 
-  function getActiveCount() {
-    const activeId = getActiveId();
-    if (activeId && threadCounts[activeId]) return threadCounts[activeId];
-    if (!activeId && Object.keys(threadCounts).length > 0) {
-      return Math.max(...Object.values(threadCounts));
+  // Resolve which captured thread the user is actually looking at. Instagram's
+  // GraphQL thread ids (thread_v2_id / fbid) frequently DON'T equal the id in
+  // the /direct/t/<id>/ URL, so an exact match is only the first choice. We then
+  // try the most-recently-updated thread (the one being viewed/scrolled), then
+  // fall back to the thread with the most messages. This mirrors how the
+  // interceptor resolves the store for export, so the popup count and the
+  // exported thread always agree.
+  function resolveActiveKey() {
+    const urlId = getActiveId();
+    if (urlId && threadCounts[urlId] > 0) return urlId;
+    if (latestId && threadCounts[latestId] > 0) return latestId;
+    let bestKey = null;
+    let bestCount = -1;
+    for (const [id, count] of Object.entries(threadCounts)) {
+      if (count > bestCount) {
+        bestCount = count;
+        bestKey = id;
+      }
     }
-    return 0;
+    return bestKey;
+  }
+
+  function getActiveCount() {
+    const key = resolveActiveKey();
+    return key != null ? (threadCounts[key] || 0) : 0;
   }
 
   function getActiveTitle() {
-    const activeId = getActiveId();
-    if (activeId && threadTitles[activeId]) return threadTitles[activeId];
+    const key = resolveActiveKey();
+    if (key != null && threadTitles[key]) return threadTitles[key];
+    // Resolved thread has no title yet — show any titled thread, busiest first.
     let best = null;
     let bestCount = -1;
     for (const [id, count] of Object.entries(threadCounts)) {
@@ -183,38 +220,49 @@
   }
 
   /* ===== Page-world bridge ===== */
-  window.addEventListener("message", (event) => {
+  window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
 
     if (event.data?.type === "IG_EXPORTER_UPDATED") {
       threadCounts = event.data.counts || {};
       threadTitles = event.data.titles || {};
-      const activeId = getActiveId() || event.data.latestId;
-      const count = threadCounts[activeId] || 0;
-      broadcastUpdate(count);
+      if (event.data.latestId) latestId = event.data.latestId;
+      broadcastUpdate(getActiveCount());
     }
 
     if (event.data?.type === "IG_EXPORTER_STORE_RESPONSE") {
       const store = event.data;
-      if (!store.threadInfo) {
+      const hasMessages = store.messages && Object.keys(store.messages).length > 0;
+      // Only metadata may be missing (IG splits messages and thread info across
+      // different ids) — that's fine, the normalizer synthesizes participants
+      // from the messages. We only truly fail when there are no messages at all.
+      if (!hasMessages) {
         chrome.runtime.sendMessage({
           type: "IG_EXPORTER_ERROR",
-          error: "No thread data captured yet. Open a thread and scroll.",
+          error: "No messages captured yet. Open the conversation and scroll up to load history.",
         });
         return;
       }
 
-      const result = normalize(store.threadInfo, store.messages);
-      const problems = validate(result);
+      try {
+        const { normalize, validate } = await getExportLib();
+        const result = normalize(store.threadInfo, store.messages);
+        const problems = validate(result);
 
-      if (problems.length > 0) {
+        if (problems.length > 0) {
+          chrome.runtime.sendMessage({
+            type: "IG_EXPORTER_ERROR",
+            error: "Validation failed",
+            problems,
+          });
+        } else {
+          chrome.runtime.sendMessage({ type: "IG_EXPORTER_SUCCESS", result });
+        }
+      } catch (err) {
         chrome.runtime.sendMessage({
           type: "IG_EXPORTER_ERROR",
-          error: "Validation failed",
-          problems,
+          error: "Couldn't load the export module (the page may be blocking it): " + (err?.message || err),
         });
-      } else {
-        chrome.runtime.sendMessage({ type: "IG_EXPORTER_SUCCESS", result });
       }
     }
   });
@@ -222,7 +270,12 @@
   /* ===== Popup commands ===== */
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "EXPORT_REQUEST") {
-      window.postMessage({ type: "IG_EXPORTER_GET_STORE", activeId: getActiveId() }, "*");
+      // Send the resolved key (not the raw URL id, which IG's payload often
+      // doesn't contain) so the exported thread matches the popup's count.
+      window.postMessage(
+        { type: "IG_EXPORTER_GET_STORE", activeId: resolveActiveKey() || getActiveId() },
+        "*"
+      );
       return;
     }
 

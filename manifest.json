@@ -1,16 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "Instagram Chat Exporter v2",
-  "version": "2.2.1",
-  "description": "Export Instagram direct messages to JSON format structurally equivalent to DYI.",
+  "name": "Instagram Exporter",
+  "version": "3.0.1",
+  "description": "Export Instagram DMs to DYI-format JSON, and download anyone's posts, images, reels, or profile picture as foldered ZIPs.",
   "permissions": [
     "activeTab",
     "scripting",
-    "downloads"
+    "downloads",
+    "offscreen"
   ],
   "host_permissions": [
-    "https://www.instagram.com/*"
+    "https://www.instagram.com/*",
+    "https://i.instagram.com/*",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

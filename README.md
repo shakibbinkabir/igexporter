@@ -6,13 +6,13 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-2.2.1-blue.svg" alt="Version" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.0.1-blue.svg" alt="Version" /></a>
   <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
 </p>
 
-A vanilla-JavaScript, fully local Chrome Extension that exports a single Instagram DM thread to a JSON file structurally equivalent to Instagram's official **"Download Your Information" (DYI)** export — without waiting days for the official archive.
+A vanilla-JavaScript, fully local Chrome Extension that **(1)** exports an Instagram DM thread to a JSON file structurally equivalent to Instagram's official **"Download Your Information" (DYI)** export, and **(2)** downloads anyone's **posts, images, reels, or profile picture** as neatly foldered ZIP archives.
 
-> **No servers. No tracking. No third-party calls.** Everything runs in your browser tab.
+> **No servers. No tracking. No third-party calls.** Everything runs in your browser using your own logged-in session — the only network traffic is to `instagram.com` and its media CDNs.
 
 ---
 
@@ -30,6 +30,20 @@ Useful for:
 ---
 
 ## Features
+
+### Profile media export (new in 3.0)
+
+- **All posts** — every post (images, carousels, videos, reels) as one ZIP, one folder per post, with each post's `caption.txt` and a top-level `index.json` manifest.
+- **All images** — images only, post-wise foldered (carousels keep their images; pure-video posts are skipped).
+- **All reels** — every reel as a flat set of `.mp4`s plus an `index.json`.
+- **Current stories** — all currently-active (24h) stories as a ZIP.
+- **Story highlights** — every highlight, one folder per highlight (named by its title), in one ZIP. Open a specific highlight first to grab just that one.
+- **Profile picture** — the full-resolution DP, downloaded directly.
+- **A single post / reel** — open it on instagram.com and grab just that post's media.
+- **Filtering** — export *everything*, the *most recent N*, the *oldest N*, or a *date range*.
+- Runs in the background, so closing the popup mid-download is safe; progress shows on the toolbar badge.
+
+### Chat export
 
 - **DYI-compatible schema** — drop the output into any tool that already parses Instagram's official export.
 - **Manifest V3** — no remote code, no `<all_urls>`, scoped to `instagram.com` only.
@@ -59,7 +73,34 @@ Works in any Chromium-based browser (Chrome, Edge, Brave, Arc, Vivaldi).
 
 ---
 
-## Usage
+## Usage — Profile media export
+
+1. Make sure you're **logged in** to Instagram in this browser.
+2. (Optional) Open the profile, post, or reel you care about — the popup auto-fills the username and detects an open post.
+3. Click the **IG Exporter** icon and switch to the **Profile** tab.
+4. Type/confirm the `@username`, pick **What to export** (All posts / All images / All reels / Current stories / Story highlights / Profile picture / This post-reel). For the feed modes, choose a **Range** (Everything, Most recent N, Oldest N, or a Date range).
+5. Click **Export**. The toolbar badge shows progress; when it finishes, Chrome prompts you to save the ZIP (or image).
+
+> You can only export from **public accounts** or **private accounts you follow** — same as what your session can already see. Large accounts take a while and are subject to Instagram's rate limits; the exporter backs off automatically on `429`.
+
+ZIP layout for **All posts**:
+
+```
+username_posts_2026-06-06.zip
+├── index.json
+├── 001_2024-05-01_Cabc123/
+│   ├── 01.jpg
+│   ├── 02.mp4
+│   ├── 02_thumb.jpg
+│   └── caption.txt
+├── 002_2024-04-18_Cxyz789/
+│   └── 01.jpg
+└── …
+```
+
+---
+
+## Usage — Chat export
 
 1. Go to <https://www.instagram.com/> and open a DM thread.
 2. **Scroll up** inside the thread to load as much history as you want exported. The extension captures messages from Instagram's own GraphQL responses as they stream in.
@@ -100,37 +141,56 @@ Each message may additionally include any of: `photos`, `videos`, `audio_files`,
 
 ## Architecture
 
+The two capabilities use two independent pipelines.
+
+**Chat export** (passive interception):
+
 ```
-popup.html / popup.js          ← extension UI, triggers export & downloads file
-        │
-        ▼
-src/bridge.js                  ← content script; relays messages between page & extension
-        │
-        ▼  (injects)
-src/interceptor.js             ← runs in page context; wraps XHR + fetch
-        │
-        ▼
-Instagram GraphQL responses    ← thread metadata + message edges captured here
-        │
-        ▼
-src/normalizer.js              ← reshapes raw GraphQL into DYI schema
-        │
-        ▼
-src/schema.js                  ← validates output before download
+popup.js (Chat tab) ─▶ src/bridge.js (content script) ─▶ src/interceptor.js (page world)
+                                  │                              │
+                                  ▼                              ▼
+                       src/normalizer.js → src/schema.js    Instagram GraphQL responses
+                                  │
+                                  ▼
+                          DYI-shaped JSON download
 ```
 
-- **`bridge.js`** runs as a content script. It imports `normalizer.js` and `schema.js` via ES modules and injects `interceptor.js` into the page's main world.
-- **`interceptor.js`** patches `XMLHttpRequest` and `fetch` to clone responses from `/api/graphql` and `/graphql/query`, harvesting any `slide_messages.edges` it sees and de-duplicating across thread-ID aliases.
-- **`normalizer.js`** maps the raw GraphQL shape to the DYI schema, resolving sender identity, media URLs, reactions, and shares.
-- **`schema.js`** runs a final structural check (required fields, sort order, boolean invariants) and refuses to export if the result is malformed.
+**Profile media export** (active, session-authenticated):
 
-Nothing is sent off-device. The only network traffic is what Instagram itself initiates.
+```
+popup.js (Profile tab) ──job──▶ background.js (service worker)
+                                       │  creates offscreen, mirrors progress → badge, runs chrome.downloads
+                                       ▼
+                                 offscreen.js (offscreen document)
+                                       │  uses src/igapi.js + src/zip.js
+              ┌────────────────────────┼─────────────────────────┐
+              ▼                        ▼                          ▼
+     instagram.com web API     *.cdninstagram.com /        builds ZIP in memory,
+     (enumerate posts via       *.fbcdn.net (media bytes)  createObjectURL → SW download
+      your session cookie)
+```
+
+- **`bridge.js` / `interceptor.js` / `normalizer.js` / `schema.js`** — unchanged chat pipeline (see above).
+- **`background.js`** — MV3 service worker; the stable hub for profile exports. Spins up the offscreen document, mirrors progress onto the toolbar badge, and performs the final `chrome.downloads.download`.
+- **`offscreen.js` / `offscreen.html`** — a headless offscreen document (the only context that can both fetch with host permissions *and* `URL.createObjectURL` a blob). Runs the chosen export pipeline, fetches CDN bytes with bounded concurrency, and assembles the ZIP.
+- **`src/igapi.js`** — thin client over Instagram's own web API endpoints (`web_profile_info`, the user feed, media info, active story, highlights tray, and reel media). The one file to patch if Instagram changes its endpoints.
+- **`src/zip.js`** — dependency-free, store-only ZIP writer with CRC32. No compression because media is already compressed.
+
+Nothing is sent off-device. The only network traffic is to Instagram and its media CDNs, using your existing session.
 
 ---
 
 ## Limitations
 
-These are intentional non-goals — they exist because the web client doesn't expose the equivalent data, not because they're hard:
+**Profile media export:**
+
+- **Login required.** You can only export public accounts or private ones you follow — exactly what your session can already see.
+- **Unofficial endpoints.** It uses Instagram's own web API, which is undocumented and changes periodically. When it breaks, `src/igapi.js` is almost always the fix.
+- **In-memory ZIP.** The whole archive is assembled in memory before saving, so exporting a very large account (many GB) can exhaust memory. Use the *Most recent N* / *date range* filters for huge profiles.
+- **Rate limits.** Aggressive exporting can trigger Instagram throttling (`429`); the exporter backs off and retries, but very large jobs may still be interrupted.
+- **Media URLs expire**, so files are fetched immediately during the run rather than listed for later.
+
+**Chat export** — these are intentional non-goals, because the web client doesn't expose the equivalent data:
 
 - **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
 - **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
@@ -143,10 +203,10 @@ These are intentional non-goals — they exist because the web client doesn't ex
 
 ## Privacy & Security
 
-- **No remote endpoints.** Inspect `manifest.json`: the only host permission is `https://www.instagram.com/*`.
-- **No remote code.** All scripts ship in this repo — Manifest V3 forbids loading anything else.
+- **Only Instagram endpoints.** Inspect `manifest.json`: host permissions are limited to `instagram.com` and Instagram's media CDNs (`*.cdninstagram.com`, `*.fbcdn.net`). Profile export calls Instagram's own web API with *your* logged-in session — never a third party.
+- **No remote code.** All scripts ship in this repo — Manifest V3 forbids loading anything else, and the ZIP writer is hand-rolled rather than a bundled library you can't read.
 - **No analytics.** No pings, no error reporting, no usage stats.
-- **You control the file.** The export uses `chrome.downloads.download` with `saveAs: true` — Chrome shows the save dialog every time.
+- **You control the file.** Every export uses `chrome.downloads.download` with `saveAs: true` — Chrome shows the save dialog every time.
 
 If you don't trust a binary you didn't build, you shouldn't — every file here is plain readable JavaScript. Read it.
 
@@ -161,12 +221,17 @@ Layout:
 ```
 igexporter/
 ├── manifest.json          # MV3 manifest
-├── popup.html / popup.js  # toolbar UI
+├── popup.html / popup.js  # toolbar UI (Chat + Profile tabs)
+├── background.js          # service worker — profile export orchestrator
+├── offscreen.html         # headless offscreen document host
+├── offscreen.js           # profile export engine (fetch → zip → download)
 ├── src/
-│   ├── bridge.js          # content script (isolated world)
-│   ├── interceptor.js     # page-world XHR/fetch hook
-│   ├── normalizer.js      # raw → DYI shape
-│   └── schema.js          # output validator
+│   ├── bridge.js          # chat: content script (isolated world)
+│   ├── interceptor.js     # chat: page-world XHR/fetch hook
+│   ├── normalizer.js      # chat: raw → DYI shape
+│   ├── schema.js          # chat: output validator
+│   ├── igapi.js           # profile: Instagram web API client
+│   └── zip.js             # profile: store-only ZIP writer
 └── icons/
 ```
 

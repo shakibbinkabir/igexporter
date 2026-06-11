@@ -17,6 +17,33 @@ const els = {
   retryBtn: document.getElementById("retryBtn"),
   copyErrBtn: document.getElementById("copyErrBtn"),
   toast: document.getElementById("toast"),
+
+  // Tabs
+  tabChat: document.getElementById("tabChat"),
+  tabProfile: document.getElementById("tabProfile"),
+  chatPanel: document.getElementById("chatPanel"),
+  profilePanel: document.getElementById("profilePanel"),
+
+  // Profile form
+  usernameInput: document.getElementById("usernameInput"),
+  modeSelect: document.getElementById("modeSelect"),
+  filterField: document.getElementById("filterField"),
+  filterSelect: document.getElementById("filterSelect"),
+  countField: document.getElementById("countField"),
+  countFieldLabel: document.getElementById("countFieldLabel"),
+  countInput: document.getElementById("countInput"),
+  dateField: document.getElementById("dateField"),
+  fromInput: document.getElementById("fromInput"),
+  toInput: document.getElementById("toInput"),
+  profileExportBtn: document.getElementById("profileExportBtn"),
+  profileHint: document.getElementById("profileHint"),
+  profileStatus: document.getElementById("profileStatus"),
+  pStatusDot: document.getElementById("pStatusDot"),
+  pStatusText: document.getElementById("pStatusText"),
+  pStatusSub: document.getElementById("pStatusSub"),
+  pCount: document.getElementById("pCount"),
+  pCountLabel: document.getElementById("pCountLabel"),
+  pProgress: document.getElementById("pProgress"),
 };
 
 const state = {
@@ -28,6 +55,15 @@ const state = {
   capturing: false,
   lastError: null,
   phase: "idle", // idle | capturing | scrolling | exporting | success | error
+  errorContext: "chat", // chat | profile — which flow owns the shared error card
+  profile: {
+    jobId: null,
+    running: false,
+    detectedUsername: "",
+    detectedShortcode: "",
+    detectedHighlightId: "",
+    lastJob: null,
+  },
 };
 
 const HINTS = {
@@ -141,6 +177,7 @@ function classifyError(msg, problems) {
 }
 
 function showError(title, body, problems) {
+  state.errorContext = "chat";
   state.lastError = { title, body, problems };
   setPhase("error", "Error", "");
   els.errorTitle.textContent = title || "Something went wrong";
@@ -194,6 +231,282 @@ function sendToTab(message, callback) {
   });
 }
 
+/* ===== Profile media export ===== */
+
+// Reserved first path segments that are never usernames.
+const IG_RESERVED = new Set([
+  "explore", "reels", "reel", "p", "tv", "direct", "stories", "accounts",
+  "about", "legal", "developer", "api", "graphql", "your_activity",
+  "settings", "emails", "challenge", "privacy",
+]);
+
+function parseIgUrl(url) {
+  const result = { username: "", shortcode: "", highlightId: "", story: false };
+  if (!url) return result;
+  let u;
+  try { u = new URL(url); } catch { return result; }
+  if (!/(^|\.)instagram\.com$/.test(u.hostname)) return result;
+
+  const segs = u.pathname.split("/").filter(Boolean);
+
+  // /stories/highlights/{id}/  → a specific highlight (no username in URL)
+  if (segs[0] === "stories" && segs[1] === "highlights" && segs[2]) {
+    result.highlightId = segs[2];
+    return result;
+  }
+  // /stories/{username}/...  → the active story viewer
+  if (segs[0] === "stories" && segs[1] && segs[1] !== "highlights") {
+    result.username = segs[1];
+    result.story = true;
+    return result;
+  }
+
+  const postIdx = segs.findIndex((s) => s === "p" || s === "reel" || s === "tv");
+  if (postIdx !== -1 && segs[postIdx + 1]) {
+    result.shortcode = segs[postIdx + 1];
+    if (postIdx > 0 && !IG_RESERVED.has(segs[0])) result.username = segs[0];
+    return result;
+  }
+  if (segs.length >= 1 && !IG_RESERVED.has(segs[0])) result.username = segs[0];
+  return result;
+}
+
+function switchTab(panelId) {
+  const onProfile = panelId === "profilePanel";
+  state.activeTab = onProfile ? "profile" : "chat";
+  els.chatPanel.hidden = onProfile;
+  els.profilePanel.hidden = !onProfile;
+  els.tabChat.classList.toggle("active", !onProfile);
+  els.tabProfile.classList.toggle("active", onProfile);
+}
+
+function updateProfileHint() {
+  const mode = els.modeSelect.value;
+  if (mode === "post") {
+    els.profileHint.textContent = state.profile.detectedShortcode
+      ? `Will export the open post (${state.profile.detectedShortcode}).`
+      : "Open a post or reel on instagram.com first.";
+  } else if (mode === "profilePic") {
+    els.profileHint.textContent = "Downloads the full-resolution profile picture.";
+  } else if (mode === "stories") {
+    els.profileHint.textContent = "Downloads all currently-active (24h) stories.";
+  } else if (mode === "highlights") {
+    els.profileHint.textContent = state.profile.detectedHighlightId
+      ? "Open highlight detected — exporting just this one. Enter the @username too."
+      : "Exports all of this account's story highlights.";
+  } else {
+    els.profileHint.textContent = state.profile.detectedUsername
+      ? ""
+      : "Tip: open a profile to auto-fill the username.";
+  }
+}
+
+function refreshProfileFields() {
+  const mode = els.modeSelect.value;
+  const isFeed = mode === "posts" || mode === "images" || mode === "reels";
+  const filter = els.filterSelect.value;
+  els.filterField.hidden = !isFeed;
+  els.countField.hidden = !(isFeed && (filter === "recent" || filter === "oldest"));
+  els.dateField.hidden = !(isFeed && filter === "range");
+  if (filter === "recent") els.countFieldLabel.textContent = "How many (most recent)";
+  else if (filter === "oldest") els.countFieldLabel.textContent = "How many (oldest)";
+  updateProfileHint();
+}
+
+function initProfile(url) {
+  const { username, shortcode, highlightId, story } = parseIgUrl(url);
+  state.profile.detectedUsername = username;
+  state.profile.detectedShortcode = shortcode;
+  state.profile.detectedHighlightId = highlightId || "";
+  if (username) els.usernameInput.value = username;
+  if (shortcode) els.modeSelect.value = "post";
+  else if (highlightId) els.modeSelect.value = "highlights";
+  else if (story) els.modeSelect.value = "stories";
+  refreshProfileFields();
+}
+
+function setProfilePhase(phase, label, sub) {
+  els.profileStatus.hidden = false;
+  els.pStatusDot.dataset.state =
+    phase === "running" ? "capturing"
+    : phase === "success" ? "success"
+    : phase === "error" ? "error"
+    : "idle";
+  els.pStatusText.firstChild.textContent = label || "Ready";
+  els.pStatusSub.textContent = sub ? ` · ${sub}` : "";
+}
+
+function setProfileProgress({ indeterminate, pct }) {
+  if (indeterminate) {
+    els.pProgress.classList.add("active");
+    els.pProgress.classList.remove("determinate");
+    els.pProgress.style.removeProperty("--pct");
+  } else {
+    els.pProgress.classList.remove("active");
+    els.pProgress.classList.add("determinate");
+    els.pProgress.style.setProperty("--pct", `${pct}%`);
+  }
+}
+
+function profileHintFor(body) {
+  const m = (body || "").toLowerCase();
+  if (m.includes("private")) return "You can only export from public accounts or ones you follow.";
+  if (m.includes("logged in") || m.includes("authoriz")) return "Open instagram.com and log in, then try again.";
+  if (m.includes("rate") || m.includes("429")) return "Instagram is throttling requests. Wait a minute and retry.";
+  if (m.includes("no such user") || m.includes("not found")) return "Check the username spelling.";
+  if (m.includes("no posts") || m.includes("no images") || m.includes("no reels")) return "Try a different range or mode.";
+  if (m.includes("post") && m.includes("open")) return "Open a post/reel page first, or pick a different mode.";
+  return "";
+}
+
+function showProfileError(title, body) {
+  state.errorContext = "profile";
+  state.lastError = { title, body, problems: null };
+  els.errorTitle.textContent = title || "Export failed";
+  els.errorBody.textContent = body || "";
+  els.errorHint.textContent = profileHintFor(body);
+  els.errorCard.hidden = false;
+  setProfilePhase("error", "Error", "");
+  els.pProgress.classList.remove("active");
+  els.profileExportBtn.disabled = false;
+  els.profileExportBtn.textContent = "Export";
+  state.profile.running = false;
+}
+
+function summaryLabel(s) {
+  if (!s) return "complete";
+  const fail = s.failed ? `, ${s.failed} failed` : "";
+  if (s.posts != null) return `${s.posts} posts${fail}`;
+  if (s.reels != null) return `${s.reels} reels${fail}`;
+  if (s.stories != null) return `${s.stories} stories${fail}`;
+  if (s.highlights != null) return `${s.highlights} highlights, ${s.files} files${fail}`;
+  if (s.files != null) return `${s.files} files${fail}`;
+  if (s.profilePic) return "profile picture";
+  return "complete";
+}
+
+function buildJobFromForm() {
+  const mode = els.modeSelect.value;
+  let username = els.usernameInput.value.trim().replace(/^@/, "");
+  const options = {};
+
+  if (mode === "post") {
+    if (!state.profile.detectedShortcode) {
+      showProfileError("No post open", "Open an Instagram post or reel in the active tab, then try again.");
+      return null;
+    }
+    options.shortcode = state.profile.detectedShortcode;
+    if (!username) username = state.profile.detectedUsername || "instagram";
+  } else if (!username) {
+    showProfileError("Username required", "Enter the @username you want to export.");
+    return null;
+  }
+
+  if (mode === "posts" || mode === "images" || mode === "reels") {
+    const ftype = els.filterSelect.value;
+    const filter = { type: ftype };
+    if (ftype === "recent" || ftype === "oldest") {
+      const n = parseInt(els.countInput.value, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        showProfileError("Invalid count", "Enter how many posts to export (1 or more).");
+        return null;
+      }
+      filter.n = n;
+    } else if (ftype === "range") {
+      filter.fromDate = els.fromInput.value || null;
+      filter.toDate = els.toInput.value || null;
+      if (!filter.fromDate && !filter.toDate) {
+        showProfileError("No dates", "Pick a From and/or To date for the range.");
+        return null;
+      }
+    }
+    options.filter = filter;
+  }
+
+  if (mode === "highlights" && state.profile.detectedHighlightId) {
+    options.highlightId = state.profile.detectedHighlightId;
+  }
+
+  return { mode, username, options };
+}
+
+function startProfileExport(job) {
+  clearError();
+  state.profile.lastJob = job;
+  state.profile.running = true;
+  state.profile.jobId = null;
+  els.profileExportBtn.disabled = true;
+  els.profileExportBtn.textContent = "Exporting…";
+  setProfilePhase("running", "Starting", "");
+  setProfileProgress({ indeterminate: true });
+  els.pCount.textContent = "0";
+  els.pCountLabel.textContent = "starting";
+
+  chrome.runtime.sendMessage(
+    { type: "PROFILE_EXPORT", mode: job.mode, username: job.username, options: job.options },
+    (resp) => {
+      if (chrome.runtime.lastError || !resp || resp.ok === false) {
+        showProfileError(
+          "Couldn't start export",
+          (resp && resp.error) || chrome.runtime.lastError?.message || "The background worker didn't respond."
+        );
+        return;
+      }
+      state.profile.jobId = resp.jobId;
+    }
+  );
+}
+
+function handleProfileMessage(msg) {
+  if (!msg) return;
+  // Ignore messages from a different job once ours is known.
+  if (state.profile.jobId && msg.jobId && msg.jobId !== state.profile.jobId) return;
+
+  if (msg.type === "EXPORT_PROGRESS") {
+    state.profile.running = true;
+    if (msg.phase === "resolving") {
+      setProfilePhase("running", "Resolving", msg.message || "");
+      setProfileProgress({ indeterminate: true });
+      els.pCount.textContent = "…";
+      els.pCountLabel.textContent = "profile";
+    } else if (msg.phase === "enumerating") {
+      setProfilePhase("running", "Scanning", "finding posts");
+      setProfileProgress({ indeterminate: true });
+      els.pCount.textContent = msg.done ?? 0;
+      els.pCountLabel.textContent = "found";
+    } else if (msg.phase === "downloading") {
+      const pct = msg.total ? Math.floor((msg.done / msg.total) * 100) : 0;
+      setProfilePhase("running", "Downloading", `${msg.done}/${msg.total}`);
+      setProfileProgress({ indeterminate: false, pct });
+      els.pCount.textContent = `${pct}%`;
+      els.pCountLabel.textContent = "downloaded";
+    } else if (msg.phase === "zipping") {
+      setProfilePhase("running", "Packaging", "building ZIP");
+      setProfileProgress({ indeterminate: true });
+      els.pCount.textContent = "…";
+      els.pCountLabel.textContent = "zipping";
+    }
+    return;
+  }
+
+  if (msg.type === "EXPORT_DONE") {
+    state.profile.running = false;
+    clearError();
+    setProfilePhase("success", "Done", msg.filename || "");
+    setProfileProgress({ indeterminate: false, pct: 100 });
+    els.pCount.textContent = "✓";
+    els.pCountLabel.textContent = summaryLabel(msg.summary);
+    els.profileExportBtn.disabled = false;
+    els.profileExportBtn.textContent = "Export";
+    showToast("✓ Saved " + (msg.filename || "file"));
+    return;
+  }
+
+  if (msg.type === "EXPORT_ERROR") {
+    showProfileError("Export failed", msg.error || "Something went wrong.");
+  }
+}
+
 /* ===== Init ===== */
 document.addEventListener("DOMContentLoaded", () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -201,6 +514,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!tab) return;
     state.tabId = tab.id;
     state.isInstagram = !!tab.url?.includes("instagram.com");
+
+    // Profile tab works regardless of the active tab; autodetect runs first.
+    initProfile(tab.url);
 
     if (!state.isInstagram) {
       setPhase("idle", "Not Instagram", "");
@@ -311,6 +627,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   els.retryBtn.addEventListener("click", () => {
+    if (state.errorContext === "profile") {
+      clearError();
+      if (state.profile.lastJob) startProfileExport(state.profile.lastJob);
+      return;
+    }
     clearError();
     if (state.count > 0) {
       els.exportBtn.click();
@@ -325,7 +646,7 @@ document.addEventListener("DOMContentLoaded", () => {
   els.copyErrBtn.addEventListener("click", async () => {
     if (!state.lastError) return;
     const payload = [
-      `IG Exporter v2.2.1 — error report`,
+      `IG Exporter v3.0.1 — error report`,
       `URL pattern: instagram.com/direct/t/...`,
       `Phase: ${state.phase}`,
       `Captured: ${state.count}`,
@@ -339,6 +660,34 @@ document.addEventListener("DOMContentLoaded", () => {
       showToast("Copied to clipboard");
     } catch {
       showToast("Copy failed");
+    }
+  });
+
+  /* ===== Profile tab wiring ===== */
+  els.tabChat.addEventListener("click", () => switchTab("chatPanel"));
+  els.tabProfile.addEventListener("click", () => switchTab("profilePanel"));
+
+  els.modeSelect.addEventListener("change", refreshProfileFields);
+  els.filterSelect.addEventListener("change", refreshProfileFields);
+  els.usernameInput.addEventListener("input", () => {
+    state.profile.detectedUsername = els.usernameInput.value.trim();
+    updateProfileHint();
+  });
+
+  els.profileExportBtn.addEventListener("click", () => {
+    if (state.profile.running) return;
+    const job = buildJobFromForm();
+    if (job) startProfileExport(job);
+  });
+
+  // Progress / completion / error from the offscreen worker (relayed broadcast).
+  chrome.runtime.onMessage.addListener((message) => {
+    if (
+      message?.type === "EXPORT_PROGRESS" ||
+      message?.type === "EXPORT_DONE" ||
+      message?.type === "EXPORT_ERROR"
+    ) {
+      handleProfileMessage(message);
     }
   });
 });

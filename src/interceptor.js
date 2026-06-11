@@ -262,12 +262,25 @@
 
       function titleFor(store) {
         const info = store?.threadInfo;
-        if (!info) return null;
-        if (info.thread_title) return info.thread_title;
-        const users = info.users || [];
-        for (const u of users) {
-          const name = u.full_name || u.username;
-          if (name) return name;
+        if (info) {
+          if (info.thread_title) return info.thread_title;
+          for (const u of (info.users || [])) {
+            const name = u.full_name || u.username;
+            if (name) return name;
+          }
+        }
+        // Message-only store (IG split the thread metadata under a different
+        // id, so this store has none): name the thread after a participant who
+        // isn't the viewer — same as what the export resolves to.
+        if (!store) return null;
+        const viewerPk = getViewerPk();
+        if (viewerPk) {
+          for (const node of store.messages.values()) {
+            if (!senderIdsOf(node).includes(viewerPk)) {
+              const name = node.sender?.user_dict?.full_name || node.sender?.name;
+              if (name) return name;
+            }
+          }
         }
         return null;
       }
@@ -345,6 +358,97 @@
   interceptXHR();
   interceptFetch();
 
+  // The active thread's store may hold the messages but no metadata: IG often
+  // delivers the message list and the thread info (title / participants /
+  // viewer) under different, non-overlapping ids, so they never merge into one
+  // store. Recover the metadata from another captured thread. The viewer (the
+  // logged-in account) is identical across every thread, and the inbox preview
+  // for THIS conversation carries the participant — so prefer a thread whose
+  // participants match this store's message senders, and otherwise fall back to
+  // any thread that at least identifies the viewer.
+  function findThreadInfoFor(store) {
+    if (!store) return null;
+    const own = store.threadInfo;
+    if (own && ((own.users && own.users.length) || own.thread_title)) return own;
+
+    const senderIds = new Set();
+    const senderNames = new Set();
+    for (const node of store.messages.values()) {
+      [node.sender_fbid, node.sender?.id, node.sender?.igid,
+       node.sender?.user_dict?.id, node.sender?.user_dict?.igid]
+        .filter(Boolean).forEach(function (id) { senderIds.add(String(id)); });
+      const name = node.sender?.user_dict?.full_name || node.sender?.name;
+      if (name) senderNames.add(name);
+    }
+
+    let viewerOnly = null;
+    for (const other of window._igExporterStore.threads.values()) {
+      const info = other.threadInfo;
+      if (!info) continue;
+      const users = info.users || [];
+      const matched = users.some(function (u) {
+        const ids = [u.id, u.pk, u.igid, u.fbid, u.interop_messaging_user_fbid]
+          .filter(Boolean).map(String);
+        return ids.some(function (id) { return senderIds.has(id); }) ||
+               senderNames.has(u.full_name) || senderNames.has(u.username);
+      });
+      if (matched) return info;
+      if (!viewerOnly && (info.viewer || info.viewer_id)) viewerOnly = info;
+    }
+    return viewerOnly || own || null;
+  }
+
+  function getViewerPk() {
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)ds_user_id=(\d+)/);
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  }
+
+  function senderIdsOf(node) {
+    return [
+      node.sender_fbid, node.sender?.id, node.sender?.igid,
+      node.sender?.pk, node.sender?.user_id,
+      node.sender?.user_dict?.id, node.sender?.user_dict?.igid, node.sender?.user_dict?.pk
+    ].filter(Boolean).map(String);
+  }
+
+  // Identify the logged-in viewer. The export needs it for the thread title,
+  // the participant list and per-message direction, but IG omits the thread
+  // `viewer` field from the fragmented message payload. The ds_user_id cookie
+  // always holds the viewer's pk; resolve the display name by finding that pk
+  // among the message senders (or any captured thread's users).
+  function enrichViewer(threadInfo, store) {
+    const pk = getViewerPk();
+    if (!pk || !store) return threadInfo;
+    const info = threadInfo ? Object.assign({}, threadInfo) : {};
+
+    let viewerName = info.viewer && (info.viewer.full_name || info.viewer.username) || null;
+    if (!viewerName) {
+      for (const node of store.messages.values()) {
+        if (senderIdsOf(node).includes(pk)) {
+          viewerName = node.sender?.user_dict?.full_name || node.sender?.name || null;
+          if (viewerName) break;
+        }
+      }
+    }
+    if (!viewerName) {
+      for (const other of window._igExporterStore.threads.values()) {
+        for (const u of (other.threadInfo?.users || [])) {
+          const ids = [u.id, u.pk, u.igid, u.fbid].filter(Boolean).map(String);
+          if (ids.includes(pk)) { viewerName = u.full_name || u.username || null; break; }
+        }
+        if (viewerName) break;
+      }
+    }
+
+    const viewer = Object.assign({}, info.viewer, { id: pk });
+    if (viewerName) viewer.full_name = viewerName;
+    info.viewer = viewer;
+    info.viewer_id = pk;
+    return info;
+  }
+
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
 
@@ -374,7 +478,7 @@
       
       window.postMessage({
         type: 'IG_EXPORTER_STORE_RESPONSE',
-        threadInfo: store ? store.threadInfo : null,
+        threadInfo: store ? enrichViewer(findThreadInfoFor(store), store) : null,
         messages: messagesObj
       }, '*');
     }

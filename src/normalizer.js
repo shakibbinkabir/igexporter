@@ -221,11 +221,36 @@ export function normalizeMessage(node, threadInfo) {
   return msg;
 }
 
+// IG frequently delivers the message list and the thread's metadata (title,
+// participants, viewer) under different ids, so by export time we may have the
+// messages but little or no thread info. Backfill participants from the message
+// senders so the export stays valid and correctly attributed. The viewer (when
+// known, e.g. borrowed from another thread) is excluded so the remaining names
+// become the conversation's participants / title.
+function synthesizeThreadInfo(rawThread, rawMessagesMap) {
+  const info = rawThread ? { ...rawThread } : {};
+  if (info.users && info.users.length > 0) return info;
+
+  const viewerName = getViewerName(info); // 'Viewer' when unknown
+  const byName = new Map();
+  for (const node of Object.values(rawMessagesMap || {})) {
+    const name = node.sender?.user_dict?.full_name || node.sender?.name;
+    if (name && !byName.has(name)) byName.set(name, { full_name: name });
+  }
+
+  let users = [...byName.values()].filter(u => u.full_name !== viewerName);
+  if (users.length === 0) users = [...byName.values()];
+  info.users = users;
+  return info;
+}
+
 export function normalize(rawThread, rawMessagesMap) {
-  const base = normalizeThreadInfo(rawThread);
-  
+  const hasInfo = rawThread && ((rawThread.users && rawThread.users.length) || rawThread.thread_title);
+  const info = hasInfo ? rawThread : synthesizeThreadInfo(rawThread, rawMessagesMap);
+  const base = normalizeThreadInfo(info);
+
   const messages = Object.values(rawMessagesMap)
-    .map(node => normalizeMessage(node, rawThread))
+    .map(node => normalizeMessage(node, info))
     .filter(Boolean)
     .sort((a, b) => b.timestamp_ms - a.timestamp_ms);
 

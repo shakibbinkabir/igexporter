@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>IG Exporter — worker</title>
+</head>
+<body>
+  <!--
+    Headless offscreen document. It never shows UI; it exists only because the
+    service worker can't use fetch-with-host-permissions + URL.createObjectURL
+    the way a document can. All profile media export work happens in offscreen.js.
+  -->
+  <script type="module" src="offscreen.js"></script>
+</body>
+</html>
