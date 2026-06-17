@@ -1,3 +1,9 @@
+// Deactivated, deleted, or blocked accounts come through with no full_name and
+// no username. Instagram's own UI (and DYI exports) label these "Instagram
+// User"; we reuse that so every participant/sender still has a valid name and
+// validation ('each participant should have a name') passes.
+const UNKNOWN_PARTICIPANT = 'Instagram User';
+
 function getViewerName(rawThread) {
   return rawThread.viewer?.full_name || rawThread.viewer?.username || 'Viewer';
 }
@@ -8,7 +14,7 @@ function getOtherParticipantName(rawThread, viewerName) {
     const name = user.full_name || user.username;
     if (name && name !== viewerName) return name;
   }
-  return users[0]?.full_name || users[0]?.username || 'Unknown';
+  return users[0]?.full_name || users[0]?.username || UNKNOWN_PARTICIPANT;
 }
 
 function getViewerIdCandidates(rawThread) {
@@ -118,11 +124,11 @@ function getCallEventDuration(node) {
 export function normalizeThreadInfo(rawThread) {
   const viewerName = getViewerName(rawThread);
   const participants = [
-    ...(rawThread.users || []).map(u => ({ name: u.full_name || u.username })),
+    ...(rawThread.users || []).map(u => ({ name: u.full_name || u.username || UNKNOWN_PARTICIPANT })),
     { name: viewerName }
   ];
-  
-  const title = rawThread.thread_title || (rawThread.users?.[0]?.full_name || rawThread.users?.[0]?.username || 'Unknown Thread');
+
+  const title = rawThread.thread_title || (rawThread.users?.[0]?.full_name || rawThread.users?.[0]?.username || UNKNOWN_PARTICIPANT);
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
   const thread_path = `inbox/${slug}_${rawThread.thread_id || 'unknown'}`;
 
@@ -158,7 +164,7 @@ export function normalizeMessage(node, threadInfo) {
       node.sender?.user_dict?.full_name ||
       node.sender?.name ||
       (fromViewer ? viewerName : otherName) ||
-      'Unknown',
+      UNKNOWN_PARTICIPANT,
     timestamp_ms,
     is_geoblocked_for_viewer: false,
     is_unsent_image_by_messenger_kid_parent: false
