@@ -5,8 +5,8 @@
 // the export job, mirrors progress onto the toolbar badge, and performs the
 // final chrome.downloads.download of the ZIP the offscreen document built.
 //
-// The chat exporter (bridge.js / interceptor.js) does not use this worker — it
-// talks straight to the popup. This file is exclusively for profile exports.
+// The chat exporter (bridge.js) does not use this worker — it talks straight to
+// the popup. This file is exclusively for profile exports.
 
 const OFFSCREEN_URL = "offscreen.html";
 

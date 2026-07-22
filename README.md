@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.0.2-blue.svg" alt="Version" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.1.0-blue.svg" alt="Version" /></a>
   <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
 </p>
 
@@ -18,7 +18,7 @@ A vanilla-JavaScript, fully local Chrome Extension that **(1)** exports an Insta
 
 ## Why
 
-Instagram's official DYI export can take **hours to weeks** to be ready, and you only get *everything* — not just the one conversation you actually need. IG Exporter captures messages directly from Instagram's own GraphQL responses as you scroll a thread, normalizes them into the exact same shape as the DYI `message_*.json` files, and hands you a download.
+Instagram's official DYI export can take **hours to weeks** to be ready, and you only get *everything* — not just the one conversation you actually need. IG Exporter pulls a single thread's full history directly from Instagram's own `direct_v2` API, normalizes it into the exact same shape as the DYI `message_*.json` files, and hands you a download.
 
 Useful for:
 
@@ -48,7 +48,7 @@ Useful for:
 - **DYI-compatible schema** — drop the output into any tool that already parses Instagram's official export.
 - **Manifest V3** — no remote code, no `<all_urls>`, scoped to `instagram.com` only.
 - **Zero backend** — no analytics, no telemetry, no network calls beyond what Instagram itself makes.
-- **Captures everything visible** — text, reactions, photos, videos, audio messages, shares, and call events.
+- **Captures everything** — text, reactions, photos, videos, audio messages, shares, and call events, fetched from Instagram's own API as you scroll (or auto-scroll) the thread.
 - **Newest-first ordering** matching DYI conventions.
 - **Real display names** — `sender_name` is always the actual name, never `"You"`.
 - **Schema validation** before download — invalid exports surface the exact problem rather than silently producing garbage.
@@ -103,12 +103,12 @@ username_posts_2026-06-06.zip
 ## Usage — Chat export
 
 1. Go to <https://www.instagram.com/> and open a DM thread.
-2. **Scroll up** inside the thread to load as much history as you want exported. The extension captures messages from Instagram's own GraphQL responses as they stream in.
-3. Click the **IG Exporter** icon in your toolbar.
-4. The popup shows the live capture count for the active thread. When you're done scrolling, click **Export JSON**.
+2. Click the **IG Exporter** icon in your toolbar and click **Start Capture**. The most recent messages load right away.
+3. **Scroll up** inside the thread to pull in older history — each scroll fetches the next page from Instagram's `direct_v2` API and the count climbs. Or click **Auto-scroll** to load the rest of the thread automatically; it stops when it reaches the beginning (or click it again to stop early).
+4. When you've loaded as much as you want, click **Export JSON**.
 5. The exporter validates the structure, then prompts you to save `instagram_<title>_<timestamp>.json`.
 
-> Tip: Instagram only loads ~20 messages per scroll. For long threads, scroll patiently until the count stops growing.
+> You control how much gets exported: stop scrolling (or stop auto-scroll) whenever you have enough, and Export packages exactly what's loaded so far.
 
 ---
 
@@ -143,13 +143,16 @@ Each message may additionally include any of: `photos`, `videos`, `audio_files`,
 
 The two capabilities use two independent pipelines.
 
-**Chat export** (passive interception):
+**Chat export** (active, session-authenticated):
 
 ```
-popup.js (Chat tab) ─▶ src/bridge.js (content script) ─▶ src/interceptor.js (page world)
-                                  │                              │
-                                  ▼                              ▼
-                       src/normalizer.js → src/schema.js    Instagram GraphQL responses
+popup.js (Chat tab) ──▶ src/bridge.js (content script on instagram.com)
+                                  │  fetches the open thread via the direct_v2 API
+                                  ▼
+                         instagram.com /api/v1/direct_v2/  (inbox lookup + paged thread history)
+                                  │
+                                  ▼
+                       src/normalizer.js → src/schema.js
                                   │
                                   ▼
                           DYI-shaped JSON download
@@ -170,7 +173,8 @@ popup.js (Profile tab) ──job──▶ background.js (service worker)
       your session cookie)
 ```
 
-- **`bridge.js` / `interceptor.js` / `normalizer.js` / `schema.js`** — unchanged chat pipeline (see above).
+- **`bridge.js`** — content script on instagram.com. On **Start Capture** it resolves the open `/direct/t/<id>/` thread to its `direct_v2` `thread_id` via an inbox lookup and loads the newest page; scrolling the thread (or **Auto-scroll**) pages older history from `/api/v1/direct_v2/threads/<id>/` using your session cookie, streaming the live count to the popup.
+- **`normalizer.js` / `schema.js`** — map each `direct_v2` message item (`text`, `media`, `raven_media`, `voice_media`, `clip`, `media_share`, `reel_share`, `video_call_event`, …) to the DYI shape and validate it. If Instagram changes the DM API, these two plus `bridge.js` are where the fix goes.
 - **`background.js`** — MV3 service worker; the stable hub for profile exports. Spins up the offscreen document, mirrors progress onto the toolbar badge, and performs the final `chrome.downloads.download`.
 - **`offscreen.js` / `offscreen.html`** — a headless offscreen document (the only context that can both fetch with host permissions *and* `URL.createObjectURL` a blob). Runs the chosen export pipeline, fetches CDN bytes with bounded concurrency, and assembles the ZIP.
 - **`src/igapi.js`** — thin client over Instagram's own web API endpoints (`web_profile_info`, the user feed, media info, active story, highlights tray, and reel media). The one file to patch if Instagram changes its endpoints.
@@ -195,9 +199,10 @@ Nothing is sent off-device. The only network traffic is to Instagram and its med
 - **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
 - **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
 - **`creation_timestamp`** on media is derived from the message timestamp when Instagram doesn't expose a separate one.
-- **Call events are emitted as `call_duration: 0`**. IG's web client surfaces calls as admin-text rows ("Started an audio call", "You missed a video call") without exposing the actual seconds the call lasted, so each call becomes one row but the real duration isn't filled in the way DYI does.
+- **Call events** are collapsed to one message per call (Instagram sends a separate "started" and "ended" row); the real `call_duration` in seconds comes from the `video_call_event` payload when present, otherwise `0` for missed/declined calls.
 - **Emojis are preserved natively** rather than mimicking the DYI export's well-known mojibake (`ð`) encoding.
-- **Realtime WebSocket payloads** are binary LightSpeed and are deliberately not decoded. Anything that only arrives over WebSocket without a GraphQL backfill will be missed — scroll the thread to force a GraphQL fetch.
+- **Unsupported/expired rows are skipped.** "Message unavailable" placeholders and view-once media whose URL has already expired carry no content, so they're dropped rather than exported as empty messages.
+- **The open conversation must be in your inbox.** The thread is located by scanning your inbox (the top several pages), so a conversation buried far down or in a separate message-requests folder may not resolve; open it fresh so it surfaces to the top.
 
 ---
 
@@ -226,9 +231,8 @@ igexporter/
 ├── offscreen.html         # headless offscreen document host
 ├── offscreen.js           # profile export engine (fetch → zip → download)
 ├── src/
-│   ├── bridge.js          # chat: content script (isolated world)
-│   ├── interceptor.js     # chat: page-world XHR/fetch hook
-│   ├── normalizer.js      # chat: raw → DYI shape
+│   ├── bridge.js          # chat: content script — direct_v2 API fetch + paging
+│   ├── normalizer.js      # chat: raw direct_v2 items → DYI shape
 │   ├── schema.js          # chat: output validator
 │   ├── igapi.js           # profile: Instagram web API client
 │   └── zip.js             # profile: store-only ZIP writer

@@ -646,7 +646,7 @@ document.addEventListener("DOMContentLoaded", () => {
   els.copyErrBtn.addEventListener("click", async () => {
     if (!state.lastError) return;
     const payload = [
-      `IG Exporter v3.0.2 — error report`,
+      `IG Exporter v3.1.0 — error report`,
       `URL pattern: instagram.com/direct/t/...`,
       `Phase: ${state.phase}`,
       `Captured: ${state.count}`,

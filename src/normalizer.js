@@ -1,216 +1,219 @@
-// Deactivated, deleted, or blocked accounts come through with no full_name and
-// no username. Instagram's own UI (and DYI exports) label these "Instagram
-// User"; we reuse that so every participant/sender still has a valid name and
-// validation ('each participant should have a name') passes.
+// src/normalizer.js
+//
+// Transforms Instagram's private direct_v2 REST message items into the Meta
+// "Download Your Information" (DYI) messages JSON shape.
+//
+// Instagram moved DM traffic off the page's main thread (into a worker /
+// service worker), so the old passive GraphQL interception could no longer see
+// any responses. bridge.js now actively fetches the thread through
+// /api/v1/direct_v2/threads/<id>/ and hands the raw `items` (newest first) plus
+// the thread metadata here. Each item carries an `item_type` discriminator;
+// this file maps the ones that hold real content to DYI messages and drops the
+// system rows (action logs, unsupported-message placeholders).
+
 const UNKNOWN_PARTICIPANT = 'Instagram User';
+const IG = 'https://www.instagram.com';
 
-function getViewerName(rawThread) {
-  return rawThread.viewer?.full_name || rawThread.viewer?.username || 'Viewer';
-}
+/* ===== name resolution ===== */
 
-function getOtherParticipantName(rawThread, viewerName) {
-  const users = rawThread.users || [];
-  for (const user of users) {
-    const name = user.full_name || user.username;
-    if (name && name !== viewerName) return name;
+// pk (string) -> display name, covering the viewer and every other participant.
+function buildUserMap(info) {
+  const map = new Map();
+  for (const u of info.users || []) {
+    const name = u.full_name || u.username;
+    if (u.pk != null && name) map.set(String(u.pk), name);
   }
-  return users[0]?.full_name || users[0]?.username || UNKNOWN_PARTICIPANT;
+  const vid = info.viewer_id != null ? String(info.viewer_id) : null;
+  if (vid && info.viewer_name) map.set(vid, info.viewer_name);
+  return map;
 }
 
-function getViewerIdCandidates(rawThread) {
-  const ids = [
-    rawThread.viewer_id,
-    rawThread.viewer?.id,
-    rawThread.viewer?.pk,
-    rawThread.viewer?.interop_messaging_user_fbid,
-    rawThread.viewer?.user_id,
-    rawThread.viewer?.igid
-  ].filter(Boolean);
-
-  return new Set(ids.map(id => String(id)));
+function viewerName(info) {
+  return info.viewer_name || 'Viewer';
 }
 
-function isViewerSender(node, rawThread, viewerName) {
-  const senderIds = [
-    node.sender_fbid,
-    node.sender?.id,
-    node.sender?.igid,
-    node.sender?.user_dict?.id,
-    node.sender?.user_dict?.igid
-  ].filter(Boolean).map(id => String(id));
-
-  const viewerIds = getViewerIdCandidates(rawThread);
-  for (const id of senderIds) {
-    if (viewerIds.has(id)) return true;
+function otherName(info) {
+  const vName = viewerName(info);
+  for (const u of info.users || []) {
+    const name = u.full_name || u.username;
+    if (name && name !== vName) return name;
   }
-
-  const senderName = node.sender?.user_dict?.full_name || node.sender?.name;
-  return !!(senderName && viewerName && senderName === viewerName);
+  const u0 = (info.users || [])[0];
+  return (u0 && (u0.full_name || u0.username)) || UNKNOWN_PARTICIPANT;
 }
 
-function getXmaMediaUrl(xma) {
+/* ===== media url helpers ===== */
+
+function imageUrl(node) {
+  return node?.image_versions2?.candidates?.[0]?.url || null;
+}
+function videoUrl(node) {
+  return node?.video_versions?.[0]?.url || null;
+}
+function photoOrVideo(msg, node, timestamp_ms) {
+  const creation_timestamp = Math.floor(timestamp_ms / 1000);
+  if (node?.media_type === 2 && videoUrl(node)) {
+    msg.videos = [{ uri: videoUrl(node), creation_timestamp }];
+  } else if (imageUrl(node)) {
+    msg.photos = [{ uri: imageUrl(node), creation_timestamp }];
+  }
+}
+
+/* ===== reactions ===== */
+
+// direct_v2 reactions: { likes: [{sender_id}], emojis: [{sender_id, emoji}] }.
+// A "like" is the double-tap heart; emojis carry the actual emoji.
+function mapReactions(item, userMap) {
+  const r = item.reactions;
+  if (!r) return null;
+  const out = [];
+  for (const like of r.likes || []) {
+    const pk = String(like.sender_id || like.user_id || '');
+    out.push({ reaction: '❤', actor: userMap.get(pk) || UNKNOWN_PARTICIPANT });
+  }
+  for (const e of r.emojis || []) {
+    const pk = String(e.sender_id || e.user_id || '');
+    out.push({ reaction: e.emoji || '', actor: userMap.get(pk) || UNKNOWN_PARTICIPANT });
+  }
+  return out.length ? out : null;
+}
+
+/* ===== per-item conversion ===== */
+
+// direct_v2 timestamps are microseconds since epoch.
+function tsMs(item) {
+  const raw = Number(item.timestamp);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.floor(raw / 1000);
+}
+
+function senderNameFor(item, info, userMap) {
+  const fromViewer =
+    item.is_sent_by_viewer === true ||
+    (item.user_id != null && String(item.user_id) === String(info.viewer_id));
   return (
-    xma?.preview_image?.url ||
-    xma?.preview_image?.fallback_url ||
-    xma?.xmaPreviewImage?.url ||
-    xma?.xmaPreviewImage?.fallback_url ||
-    xma?.xmaPreviewImage?.fallback_url ||
-    null
+    userMap.get(String(item.user_id)) ||
+    (fromViewer ? viewerName(info) : otherName(info)) ||
+    UNKNOWN_PARTICIPANT
   );
 }
 
-function getMediaUrlFromNode(node) {
-  return (
-    getXmaMediaUrl(node.content?.xma) ||
-    node.content?.preview_image?.url ||
-    node.content?.preview_image?.fallback_url ||
-    node.content?.image?.url ||
-    node.content?.image?.uri ||
-    node.content?.image_versions2?.candidates?.[0]?.url ||
-    node.media?.image_versions2?.candidates?.[0]?.url ||
-    node.media?.video_versions?.[0]?.url ||
-    node.media?.audio?.url ||
-    null
-  );
-}
+// Returns a DYI message object, or null to drop the item. Call events
+// (video_call_event) are handled separately in normalize() so paired
+// started/ended rows collapse into one call_duration message.
+export function normalizeItem(item, info, userMap) {
+  const timestamp_ms = tsMs(item);
+  if (timestamp_ms == null) return null;
 
-// IG's web client delivers system-generated rows (call events, theme changes,
-// member adds, etc.) as content_type: "TEXT" with text_body: null and the
-// actual description in content.text_fragments under __typename:
-// "SlideMessageAdminText". These helpers detect that shape.
-function isSlideAdminText(node) {
-  const t = node.content?.__typename || node.content?.__isSlideMessageContent;
-  return t === 'SlideMessageAdminText';
-}
-
-function getSlideAdminText(node) {
-  const fragments = node.content?.text_fragments;
-  if (!Array.isArray(fragments)) return '';
-  return fragments.map(f => f?.plaintext || '').join('');
-}
-
-// Returns a non-negative number if this node represents a call event,
-// otherwise null. In practice IG delivers calls as SlideMessageAdminText
-// rows with plaintext like "Started an audio call" / "You missed a video
-// call" / "Audio call ended". We also keep speculative branches for older
-// XMA-based and ACTION_LOG-based shapes that may appear in other IG
-// versions. NOTE: interceptor.js mirrors this check in isExportable(); keep
-// both in sync when adjusting the patterns.
-function getCallEventDuration(node) {
-  if (typeof node.call_duration === 'number') return node.call_duration;
-
-  const xma = node.content?.xma;
-  if (xma && typeof xma.call_duration === 'number') return xma.call_duration;
-
-  const ct = (node.content_type || '').toUpperCase();
-  if (/CALL/.test(ct)) return 0;
-
-  const xmaTypename = xma?.__typename || xma?.xma_layout_type || '';
-  if (/call/i.test(xmaTypename)) return 0;
-
-  if (isSlideAdminText(node)) {
-    const text = getSlideAdminText(node).toLowerCase();
-    // IG sends a "Started/Missed an audio call" admin row when the call
-    // happens AND a separate "Audio call ended" row when it finishes. DYI
-    // emits one call_duration row per call, so keep the start/miss events
-    // (which carry the actor + initiating timestamp) and drop the "ended"
-    // tail which is redundant.
-    if (/\bcall\b/.test(text) && !/\bended\b/.test(text)) return 0;
+  const type = item.item_type;
+  if (type === 'action_log' || type === 'placeholder' || type === 'video_call_event') {
+    return null;
   }
-
-  return null;
-}
-
-export function normalizeThreadInfo(rawThread) {
-  const viewerName = getViewerName(rawThread);
-  const participants = [
-    ...(rawThread.users || []).map(u => ({ name: u.full_name || u.username || UNKNOWN_PARTICIPANT })),
-    { name: viewerName }
-  ];
-
-  const title = rawThread.thread_title || (rawThread.users?.[0]?.full_name || rawThread.users?.[0]?.username || UNKNOWN_PARTICIPANT);
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-  const thread_path = `inbox/${slug}_${rawThread.thread_id || 'unknown'}`;
-
-  return {
-    participants,
-    title,
-    is_still_participant: true,
-    thread_path,
-    magic_words: []
-  };
-}
-
-export function normalizeMessage(node, threadInfo) {
-  const viewerName = getViewerName(threadInfo);
-  const otherName = getOtherParticipantName(threadInfo, viewerName);
-  const fromViewer = isViewerSender(node, threadInfo, viewerName);
-
-  const tsRaw = node.timestamp_ms;
-  const timestamp_ms = typeof tsRaw === 'number' ? tsRaw : parseInt(tsRaw || '0', 10);
-  if (!Number.isFinite(timestamp_ms) || timestamp_ms <= 0) return null;
-
-  const contentType = node.content_type;
-  const xma = node.content?.xma;
-  const mediaUrl = getMediaUrlFromNode(node);
-  const callDuration = getCallEventDuration(node);
-
-  // REACTION_LOG_XMAT is always noise (it's the "X reacted ❤" system message;
-  // we already attach reactions inline to the original message).
-  if (contentType === 'REACTION_LOG_XMAT') return null;
 
   const msg = {
-    sender_name:
-      node.sender?.user_dict?.full_name ||
-      node.sender?.name ||
-      (fromViewer ? viewerName : otherName) ||
-      UNKNOWN_PARTICIPANT,
+    sender_name: senderNameFor(item, info, userMap),
     timestamp_ms,
     is_geoblocked_for_viewer: false,
-    is_unsent_image_by_messenger_kid_parent: false
+    is_unsent_image_by_messenger_kid_parent: false,
   };
 
-  if (callDuration === null) {
-    // Only set content for non-call rows; the action-log description on a call
-    // node (e.g. "Started an audio call") is not part of the DYI call shape.
-    if (typeof node.text_body === 'string' && node.text_body.trim().length > 0) {
-      msg.content = node.text_body;
-    } else if (typeof node.igd_snippet === 'string' && node.igd_snippet.trim().length > 0) {
-      msg.content = node.igd_snippet;
+  switch (type) {
+    case 'text':
+      if (item.text && item.text.trim()) msg.content = item.text;
+      break;
+
+    case 'link': {
+      const text = item.link?.text || item.text;
+      if (text && text.trim()) msg.content = text;
+      break;
     }
-  }
 
-  if (node.reactions && Array.isArray(node.reactions) && node.reactions.length > 0) {
-    msg.reactions = node.reactions.map(r => {
-      const actorName = fromViewer ? (otherName || 'Unknown') : (viewerName || 'Unknown');
-      return {
-        reaction: r.reaction || r.emoji || r.reaction_type || '',
-        actor: actorName
+    case 'media':
+      photoOrVideo(msg, item.media, timestamp_ms);
+      break;
+
+    // View-once (disappearing) photo/video. The media node still carries
+    // image/video URLs while unviewed; treat it like a normal media message.
+    case 'raven_media':
+      photoOrVideo(msg, item.raven_media || item.visual_media?.media || item.visual_media, timestamp_ms);
+      break;
+
+    case 'voice_media': {
+      const uri =
+        item.voice_media?.media?.audio?.audio_src ||
+        item.voice_media?.audio?.audio_src ||
+        null;
+      msg.audio_files = [{ uri: uri || 'audio.mp4', creation_timestamp: Math.floor(timestamp_ms / 1000) }];
+      break;
+    }
+
+    // Animated GIF / sticker.
+    case 'animated_media': {
+      const url =
+        item.animated_media?.images?.fixed_height?.url ||
+        item.animated_media?.url ||
+        null;
+      if (url) msg.photos = [{ uri: url, creation_timestamp: Math.floor(timestamp_ms / 1000) }];
+      break;
+    }
+
+    // Shared reel.
+    case 'clip': {
+      const clip = item.clip?.clip || item.clip;
+      const code = clip?.code;
+      msg.share = {
+        link: code ? `${IG}/reel/${code}/` : '',
+        share_text: clip?.caption?.text || '',
+        original_content_owner: clip?.user?.username || '',
       };
-    });
+      break;
+    }
+
+    // Shared feed post.
+    case 'media_share': {
+      const node = item.direct_media_share?.media || item.media_share;
+      const code = node?.code;
+      msg.share = {
+        link: code ? `${IG}/p/${code}/` : '',
+        share_text: item.direct_media_share?.text || '',
+        original_content_owner: node?.user?.username || '',
+      };
+      break;
+    }
+
+    // Shared story.
+    case 'story_share': {
+      const node = item.story_share?.media;
+      const code = node?.code;
+      msg.share = {
+        link: code ? `${IG}/p/${code}/` : item.story_share?.link || '',
+        share_text: item.story_share?.text || item.story_share?.title || '',
+        original_content_owner: item.story_share?.user?.username || node?.user?.username || '',
+      };
+      break;
+    }
+
+    // Reply/reaction to a story or reel: usually a text reply, sometimes a
+    // reshare. Prefer the reply text; fall back to a link to the media.
+    case 'reel_share': {
+      const rs = item.reel_share;
+      if (rs?.text && rs.text.trim()) {
+        msg.content = rs.text;
+      } else if (rs?.media?.code) {
+        msg.share = { link: `${IG}/reel/${rs.media.code}/`, share_text: '', original_content_owner: '' };
+      }
+      break;
+    }
+
+    default:
+      // Unknown/newer type: salvage any plain text so a real message is never
+      // silently dropped.
+      if (item.text && item.text.trim()) msg.content = item.text;
+      break;
   }
 
-  if (callDuration !== null) {
-    msg.call_duration = callDuration;
-  } else if (isSlideAdminText(node)) {
-    // Non-call admin-text rows (theme changed, polls, etc.) aren't part of
-    // the DYI export.
-    return null;
-  } else if (contentType === 'ACTION_LOG' || contentType === 'IgDirectThreadActionLogXPItem') {
-    return null;
-  } else if (contentType === 'IMAGES' && mediaUrl) {
-    msg.photos = [{ uri: mediaUrl, creation_timestamp: Math.floor(msg.timestamp_ms / 1000) }];
-  } else if (contentType === 'VIDEOS' && mediaUrl) {
-    msg.videos = [{ uri: mediaUrl, creation_timestamp: Math.floor(msg.timestamp_ms / 1000) }];
-  } else if (contentType === 'AUDIOS') {
-    msg.audio_files = [{ uri: mediaUrl || 'audio.mp4', creation_timestamp: Math.floor(msg.timestamp_ms / 1000) }];
-  } else if (contentType === 'MESSAGE_INLINE_SHARE' || contentType === 'MONTAGE_SHARE_XMA') {
-    msg.share = {
-      link: getXmaMediaUrl(xma) || '',
-      share_text: xma?.header_title_text || xma?.xmaHeaderTitle || '',
-      original_content_owner: '' // Not explicitly in findings
-    };
-  }
+  const reactions = mapReactions(item, userMap);
+  if (reactions) msg.reactions = reactions;
 
   const hasPayload = !!(
     msg.content ||
@@ -218,50 +221,85 @@ export function normalizeMessage(node, threadInfo) {
     msg.videos ||
     msg.audio_files ||
     msg.share ||
-    'call_duration' in msg || // 0 is valid (missed/declined call)
-    (msg.reactions && msg.reactions.length > 0)
+    (msg.reactions && msg.reactions.length)
   );
-
   if (!hasPayload) return null;
-
   return msg;
 }
 
-// IG frequently delivers the message list and the thread's metadata (title,
-// participants, viewer) under different ids, so by export time we may have the
-// messages but little or no thread info. Backfill participants from the message
-// senders so the export stays valid and correctly attributed. The viewer (when
-// known, e.g. borrowed from another thread) is excluded so the remaining names
-// become the conversation's participants / title.
-function synthesizeThreadInfo(rawThread, rawMessagesMap) {
-  const info = rawThread ? { ...rawThread } : {};
-  if (info.users && info.users.length > 0) return info;
-
-  const viewerName = getViewerName(info); // 'Viewer' when unknown
-  const byName = new Map();
-  for (const node of Object.values(rawMessagesMap || {})) {
-    const name = node.sender?.user_dict?.full_name || node.sender?.name;
-    if (name && !byName.has(name)) byName.set(name, { full_name: name });
+// IG sends a video_call_started AND a video_call_ended row per call. DYI emits
+// one call_duration message per call, so collapse them by vc_id, keeping the
+// largest duration seen (the "ended" row) at the earliest timestamp (the
+// "started" row).
+function callMessages(items, info, userMap) {
+  const byVc = new Map();
+  for (const item of items) {
+    if (item.item_type !== 'video_call_event') continue;
+    const ts = tsMs(item);
+    if (ts == null) continue;
+    const vce = item.video_call_event || {};
+    const key = vce.vc_id || item.item_id;
+    const duration = typeof vce.call_duration === 'number' ? vce.call_duration : 0;
+    const prev = byVc.get(key);
+    if (!prev) {
+      byVc.set(key, {
+        sender_name: senderNameFor(item, info, userMap),
+        timestamp_ms: ts,
+        call_duration: duration,
+      });
+    } else {
+      prev.call_duration = Math.max(prev.call_duration, duration);
+      prev.timestamp_ms = Math.min(prev.timestamp_ms, ts);
+    }
   }
-
-  let users = [...byName.values()].filter(u => u.full_name !== viewerName);
-  if (users.length === 0) users = [...byName.values()];
-  info.users = users;
-  return info;
+  return [...byVc.values()].map((c) => ({
+    sender_name: c.sender_name,
+    timestamp_ms: c.timestamp_ms,
+    is_geoblocked_for_viewer: false,
+    is_unsent_image_by_messenger_kid_parent: false,
+    call_duration: c.call_duration,
+  }));
 }
 
-export function normalize(rawThread, rawMessagesMap) {
-  const hasInfo = rawThread && ((rawThread.users && rawThread.users.length) || rawThread.thread_title);
-  const info = hasInfo ? rawThread : synthesizeThreadInfo(rawThread, rawMessagesMap);
-  const base = normalizeThreadInfo(info);
+/* ===== thread-level ===== */
 
-  const messages = Object.values(rawMessagesMap)
-    .map(node => normalizeMessage(node, info))
+function slugify(s) {
+  return (
+    String(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'thread'
+  );
+}
+
+// `items` may be an array of raw direct_v2 items or a map of them.
+export function normalize(threadInfo, items) {
+  const info = threadInfo || {};
+  const userMap = buildUserMap(info);
+  const vName = viewerName(info);
+
+  const others = (info.users || []).map((u) => u.full_name || u.username).filter(Boolean);
+  const participants = [
+    ...(others.length ? others : [UNKNOWN_PARTICIPANT]).map((name) => ({ name })),
+    { name: vName },
+  ];
+
+  const title = info.thread_title || others[0] || UNKNOWN_PARTICIPANT;
+  const thread_path = `inbox/${slugify(title)}_${info.thread_id || 'unknown'}`;
+
+  const list = Array.isArray(items) ? items : Object.values(items || {});
+  const messages = list
+    .map((item) => normalizeItem(item, info, userMap))
     .filter(Boolean)
+    .concat(callMessages(list, info, userMap))
     .sort((a, b) => b.timestamp_ms - a.timestamp_ms);
 
   return {
-    ...base,
-    messages
+    participants,
+    title,
+    is_still_participant: true,
+    thread_path,
+    magic_words: [],
+    messages,
   };
 }
