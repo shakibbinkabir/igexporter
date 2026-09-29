@@ -78,6 +78,8 @@
         res = await fetch(path, {
           method: "GET",
           credentials: "include",
+          // A stalled request would otherwise hang capture forever.
+          signal: AbortSignal.timeout(20000),
           headers: {
             "x-ig-app-id": APP_ID,
             "x-requested-with": "XMLHttpRequest",
@@ -172,6 +174,7 @@
     for (const item of store.items.values()) {
       const t = item.item_type;
       if (t === "action_log" || t === "placeholder") continue;
+      if (t === "text" && !item.text?.trim()) continue; // dropped by the normalizer
       if (t === "video_call_event") {
         calls.add(item.video_call_event?.vc_id || item.item_id);
         continue;

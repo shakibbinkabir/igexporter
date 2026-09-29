@@ -67,6 +67,8 @@ const state = {
 };
 
 const HINTS = {
+  auth: "Open instagram.com and log in, then try again.",
+  rate: "Instagram is throttling requests. Wait a minute and retry.",
   no_thread: "Open a DM conversation at instagram.com/direct/t/...",
   no_messages: "Click Start Capture, then scroll up inside the thread to load history.",
   validation: "The data Instagram returned didn't match the expected shape. Try refreshing the page and capturing again.",
@@ -169,10 +171,12 @@ function updateThread(title) {
 function classifyError(msg, problems) {
   const m = (msg || "").toLowerCase();
   if (m.includes("bridge") || m.includes("refresh")) return "bridge";
-  if (m.includes("no thread") || m.includes("not captured")) return "no_messages";
+  if (m.includes("logged in") || m.includes("authoriz")) return "auth";
+  if (m.includes("rate-limit") || m.includes("429")) return "rate";
+  if (m.includes("no messages")) return "no_messages";
   if (m.includes("validation") || (problems && problems.length)) return "validation";
   if (m.includes("download")) return "download";
-  if (m.includes("instagram")) return "no_thread";
+  if (m.includes("conversation")) return "no_thread";
   return "unknown";
 }
 
@@ -261,7 +265,9 @@ function parseIgUrl(url) {
     return result;
   }
 
-  const postIdx = segs.findIndex((s) => s === "p" || s === "reel" || s === "tv");
+  // /p/{code}/, /reel/{code}/, /tv/{code}/, /reels/{code}/ (the Reels feed),
+  // optionally prefixed with /{username}/.
+  const postIdx = segs.findIndex((s) => s === "p" || s === "reel" || s === "reels" || s === "tv");
   if (postIdx !== -1 && segs[postIdx + 1]) {
     result.shortcode = segs[postIdx + 1];
     if (postIdx > 0 && !IG_RESERVED.has(segs[0])) result.username = segs[0];
@@ -292,7 +298,7 @@ function updateProfileHint() {
     els.profileHint.textContent = "Downloads all currently-active (24h) stories.";
   } else if (mode === "highlights") {
     els.profileHint.textContent = state.profile.detectedHighlightId
-      ? "Open highlight detected — exporting just this one. Enter the @username too."
+      ? "Open highlight detected — exporting just this one."
       : "Exports all of this account's story highlights.";
   } else {
     els.profileHint.textContent = state.profile.detectedUsername
@@ -387,7 +393,7 @@ function summaryLabel(s) {
 
 function buildJobFromForm() {
   const mode = els.modeSelect.value;
-  let username = els.usernameInput.value.trim().replace(/^@/, "");
+  const username = els.usernameInput.value.trim().replace(/^@/, "");
   const options = {};
 
   if (mode === "post") {
@@ -396,8 +402,7 @@ function buildJobFromForm() {
       return null;
     }
     options.shortcode = state.profile.detectedShortcode;
-    if (!username) username = state.profile.detectedUsername || "instagram";
-  } else if (!username) {
+  } else if (!username && !(mode === "highlights" && state.profile.detectedHighlightId)) {
     showProfileError("Username required", "Enter the @username you want to export.");
     return null;
   }
@@ -509,6 +514,8 @@ function handleProfileMessage(msg) {
 
 /* ===== Init ===== */
 document.addEventListener("DOMContentLoaded", () => {
+  document.querySelector(".version").textContent = `v${chrome.runtime.getManifest().version}`;
+
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs[0];
     if (!tab) return;
@@ -570,20 +577,23 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (message.type === "IG_EXPORTER_ERROR") {
-      showError("Export failed", message.error, message.problems);
+      showError(state.phase === "exporting" ? "Export failed" : "Capture failed", message.error, message.problems);
     }
 
     if (message.type === "IG_EXPORTER_SUCCESS") {
       const data = message.result;
-      const safeTitle = (data.title || "thread").replace(/[^a-z0-9_-]/gi, "_");
+      // Keep letters from any script so non-Latin names stay readable.
+      const safeTitle = (data.title || "thread").replace(/[\uFE00-\uFE0F\u200D]/g, "").replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "_");
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const filename = `instagram_${safeTitle}_${timestamp}.json`;
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
 
-      chrome.downloads.download({ url, filename, saveAs: true }, () => {
-        if (chrome.runtime.lastError) {
-          showError("Download failed", chrome.runtime.lastError.message);
+      // Saved by the service worker, which keeps download managers from
+      // renaming the file.
+      chrome.runtime.sendMessage({ type: "SAVE_FILE", url, filename }, (resp) => {
+        if (chrome.runtime.lastError || !resp?.ok) {
+          showError("Download failed", resp?.error || chrome.runtime.lastError?.message || "The background worker didn't respond.");
           return;
         }
         setPhase("success", "Exported", `${data.messages.length} messages`);
@@ -645,12 +655,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   els.copyErrBtn.addEventListener("click", async () => {
     if (!state.lastError) return;
+    const chat = state.errorContext === "chat";
     const payload = [
-      `IG Exporter v3.1.0 — error report`,
-      `URL pattern: instagram.com/direct/t/...`,
-      `Phase: ${state.phase}`,
-      `Captured: ${state.count}`,
-      `Capturing: ${state.capturing}`,
+      `IG Exporter v${chrome.runtime.getManifest().version} — ${chat ? "chat" : "profile"} error report`,
+      chat ? `Phase: ${state.phase}` : `Mode: ${state.profile.lastJob?.mode || els.modeSelect.value}`,
+      chat ? `Captured: ${state.count}` : null,
+      chat ? `Capturing: ${state.capturing}` : null,
       `Title: ${state.lastError.title}`,
       `Body: ${state.lastError.body}`,
       state.lastError.problems?.length ? `Problems:\n${state.lastError.problems.map(p => "  - " + p).join("\n")}` : null,

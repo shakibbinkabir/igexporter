@@ -15,9 +15,8 @@ import {
   extractMedia,
   shortcodeToMediaId,
   getMediaInfo,
-  getActiveStory,
+  getReel,
   getHighlightsTray,
-  getReelMedia,
   IGError,
 } from "./src/igapi.js";
 
@@ -51,8 +50,14 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 /* ===== small utilities ===== */
 
+// Keep letters/marks/digits from any script (Bengali, Arabic, CJK, …) so names
+// stay readable; replace everything else, including path separators. Emoji
+// selectors/joiners go first so a dropped emoji doesn't leave one behind.
 function sanitize(name) {
-  return String(name).replace(/[^a-z0-9_\-.]+/gi, "_").replace(/^_+|_+$/g, "") || "untitled";
+  return String(name)
+    .replace(/[\uFE00-\uFE0F\u200D]/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}_\-.]+/gu, "_")
+    .replace(/^[_.]+|_+$/g, "") || "untitled";
 }
 
 function pad(n, width = 2) {
@@ -75,6 +80,20 @@ async function fetchBytes(url) {
   const res = await fetch(url, { credentials: "omit" });
   if (!res.ok) throw new Error(`media ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+// Instagram's CDN serves most images as WebP even where the API implies JPEG,
+// so name image files by what the bytes actually are.
+function imageExt(bytes) {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "jpg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return "png";
+  if (String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP") return "webp";
+  return null;
+}
+
+function withRealExt(path, bytes) {
+  const ext = /\.(jpg|png|webp)$/.test(path) && imageExt(bytes);
+  return ext ? path.replace(/\.\w+$/, `.${ext}`) : path;
 }
 
 // Run `worker` over `items` with bounded concurrency, preserving index order.
@@ -101,7 +120,9 @@ function primaryMedia(ex) {
 }
 
 // Download a flat queue of { path, url } media into ZIP entries, reporting
-// file-level progress. Returns { entries, failed, total }.
+// file-level progress. Fixes each q.path's extension to the real file type in
+// place, so indexes built afterwards from the queue match the ZIP.
+// Returns { entries, failed, total }.
 async function fetchQueueToEntries(jobId, queue, label) {
   const total = queue.length;
   let done = 0;
@@ -110,14 +131,14 @@ async function fetchQueueToEntries(jobId, queue, label) {
   const fetched = await mapPool(queue, MEDIA_CONCURRENCY, async (q) => {
     try {
       const bytes = await fetchBytes(q.url);
-      done++;
-      progress(jobId, "downloading", done, total);
+      q.path = withRealExt(q.path, bytes);
       return { path: q.path, bytes };
     } catch {
       failed++;
+      return null;
+    } finally {
       done++;
       progress(jobId, "downloading", done, total);
-      return null;
     }
   });
   return { entries: fetched.filter(Boolean), failed, total };
@@ -125,23 +146,28 @@ async function fetchQueueToEntries(jobId, queue, label) {
 
 /* ===== enumeration ===== */
 
-// Collect normalized posts from a user's feed, honoring the mode filter
+// Collect normalized posts from a user's grid, honoring the mode filter
 // (e.g. reels-only) and the count/date filters. Returns newest-first.
-async function collectItems(jobId, userId, modeFilter, filter) {
+async function collectItems(jobId, username, modeFilter, filter) {
   const collected = [];
+  const seen = new Set();
   const fromTs = filter?.fromDate ? Math.floor(Date.parse(filter.fromDate + "T00:00:00") / 1000) : null;
   const toTs = filter?.toDate ? Math.floor(Date.parse(filter.toDate + "T23:59:59") / 1000) : null;
-  const recentLimit = filter?.type === "recent" ? Math.max(1, filter.n | 0) : null;
+  const n = Math.max(1, filter?.n | 0);
+  let unpinned = 0;
 
   let stop = false;
-  await paginateFeed(userId, (rawItems) => {
+  await paginateFeed(username, (rawItems) => {
     for (const raw of rawItems) {
       const ex = extractMedia(raw);
+      if (seen.has(ex.shortcode)) continue;
+      seen.add(ex.shortcode);
 
       if (filter?.type === "range") {
-        // Feed is newest-first: once we drop below "from", nothing older
-        // can qualify, so stop paging entirely.
         if (fromTs && ex.takenAt && ex.takenAt < fromTs) {
+          // Past the pinned posts the grid is newest-first: once we drop below
+          // "from", nothing older can qualify, so stop paging entirely.
+          if (ex.pinned) continue;
           stop = true;
           break;
         }
@@ -153,7 +179,9 @@ async function collectItems(jobId, userId, modeFilter, filter) {
       collected.push(ex);
       progress(jobId, "enumerating", collected.length, null, `Found ${collected.length} items…`);
 
-      if (recentLimit && collected.length >= recentLimit) {
+      // Pinned posts can be arbitrarily old, so only chronological ones count
+      // towards "most recent N"; the sort below puts pinned ones in place.
+      if (filter?.type === "recent" && !ex.pinned && ++unpinned >= n) {
         stop = true;
         break;
       }
@@ -161,10 +189,9 @@ async function collectItems(jobId, userId, modeFilter, filter) {
     return stop;
   });
 
-  if (filter?.type === "oldest") {
-    const n = Math.max(1, filter.n | 0);
-    return collected.slice(-n);
-  }
+  collected.sort((a, b) => b.takenAt - a.takenAt);
+  if (filter?.type === "recent") return collected.slice(0, n);
+  if (filter?.type === "oldest") return collected.slice(-n);
   return collected;
 }
 
@@ -172,12 +199,12 @@ async function collectItems(jobId, userId, modeFilter, filter) {
 
 // Build the per-post file list (names + urls) from a normalized item.
 // `imagesOnly` drops videos and their poster thumbnails.
-function planPostFiles(post, { imagesOnly = false, includeThumbs = true } = {}) {
+function planPostFiles(post, { imagesOnly = false } = {}) {
   const files = [];
   let slot = 0;
   for (const m of post.media) {
     if (m.isThumb) {
-      if (imagesOnly || !includeThumbs) continue;
+      if (imagesOnly) continue;
       files.push({ name: `${pad(slot)}_thumb.jpg`, url: m.url });
       continue;
     }
@@ -191,7 +218,7 @@ function planPostFiles(post, { imagesOnly = false, includeThumbs = true } = {}) 
 // Shared pipeline for the foldered ZIP modes (posts / images).
 async function exportFolderedZip(job, user, { imagesOnly }) {
   const { jobId } = job;
-  const items = await collectItems(jobId, user.id, () => true, job.options.filter);
+  const items = await collectItems(jobId, user.username, () => true, job.options.filter);
 
   // Attach a planned file list to each post; drop posts that contribute nothing.
   const posts = [];
@@ -214,29 +241,11 @@ async function exportFolderedZip(job, user, { imagesOnly }) {
     const idx = i + 1;
     const folder = `${pad(idx, 3)}_${dateStr(p.post.takenAt)}_${sanitize(p.post.shortcode)}`;
     p.folder = folder;
-    for (const f of p.files) queue.push({ path: `${folder}/${f.name}`, url: f.url });
+    for (const f of p.files) queue.push({ path: `${folder}/${f.name}`, url: f.url, file: f });
   });
 
-  const total = queue.length;
-  let done = 0;
-  let failed = 0;
-  progress(jobId, "downloading", 0, total, `Downloading ${total} files…`);
-
-  const fetched = await mapPool(queue, MEDIA_CONCURRENCY, async (q) => {
-    try {
-      const bytes = await fetchBytes(q.url);
-      done++;
-      progress(jobId, "downloading", done, total);
-      return { path: q.path, bytes };
-    } catch {
-      failed++;
-      done++;
-      progress(jobId, "downloading", done, total);
-      return null;
-    }
-  });
-
-  const entries = fetched.filter(Boolean);
+  const { entries, failed, total } = await fetchQueueToEntries(jobId, queue, "files");
+  for (const q of queue) q.file.name = q.path.slice(q.path.indexOf("/") + 1);
 
   // caption.txt per post + a top-level index.json.
   const index = [];
@@ -268,12 +277,12 @@ async function exportFolderedZip(job, user, { imagesOnly }) {
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
   const zipBytes = createZip(entries);
   const suffix = imagesOnly ? "images" : "posts";
-  finishZip(job, zipBytes, `${sanitize(user.username)}_${suffix}_${nowStamp()}.zip`, { posts: posts.length, files: total, failed });
+  finishBlob(job, zipBytes, `${sanitize(user.username)}_${suffix}_${nowStamp()}.zip`, { posts: posts.length, files: total, failed });
 }
 
 async function exportReels(job, user) {
   const { jobId } = job;
-  const reels = await collectItems(jobId, user.id, (ex) => ex.kind === "reel", job.options.filter);
+  const reels = await collectItems(jobId, user.username, (ex) => ex.kind === "reel", job.options.filter);
   if (reels.length === 0) throw new IGError("No reels found for this selection.", 0);
 
   const queue = [];
@@ -285,26 +294,7 @@ async function exportReels(job, user) {
     queue.push({ path: name, url: video.url, post: r });
   });
 
-  const total = queue.length;
-  let done = 0;
-  let failed = 0;
-  progress(jobId, "downloading", 0, total, `Downloading ${total} reels…`);
-
-  const fetched = await mapPool(queue, MEDIA_CONCURRENCY, async (q) => {
-    try {
-      const bytes = await fetchBytes(q.url);
-      done++;
-      progress(jobId, "downloading", done, total);
-      return { path: q.path, bytes };
-    } catch {
-      failed++;
-      done++;
-      progress(jobId, "downloading", done, total);
-      return null;
-    }
-  });
-
-  const entries = fetched.filter(Boolean);
+  const { entries, failed, total } = await fetchQueueToEntries(jobId, queue, "reels");
   entries.push({
     path: "index.json",
     bytes: textEncoder.encode(JSON.stringify({
@@ -325,13 +315,13 @@ async function exportReels(job, user) {
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
   const zipBytes = createZip(entries);
-  finishZip(job, zipBytes, `${sanitize(user.username)}_reels_${nowStamp()}.zip`, { reels: total, failed });
+  finishBlob(job, zipBytes, `${sanitize(user.username)}_reels_${nowStamp()}.zip`, { reels: total, failed });
 }
 
 async function exportStories(job, user) {
   const { jobId } = job;
   progress(jobId, "enumerating", 0, null, "Loading stories…");
-  const rawItems = await getActiveStory(user.id);
+  const { items: rawItems } = await getReel(user.id);
 
   const queue = [];
   rawItems.forEach((raw, i) => {
@@ -369,37 +359,34 @@ async function exportStories(job, user) {
   });
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
-  finishZip(job, createZip(entries), `${sanitize(user.username)}_stories_${nowStamp()}.zip`, { stories: total, failed });
+  finishBlob(job, createZip(entries), `${sanitize(user.username)}_stories_${nowStamp()}.zip`, { stories: total, failed });
 }
 
+// `user` is null when exporting just the highlight open in the tab — the
+// highlight itself says who owns it, so no username is needed.
 async function exportHighlights(job, user) {
   const { jobId } = job;
   progress(jobId, "enumerating", 0, null, "Loading highlights…");
-  const tray = await getHighlightsTray(user.id);
-  if (tray.length === 0) throw new IGError(`@${user.username} has no highlights.`, 0);
-
-  // Scope to a single highlight if one was opened in the tab.
-  let selected = tray;
   const wantId = job.options.highlightId
     ? String(job.options.highlightId).replace(/^highlight:/, "")
     : null;
-  if (wantId) {
-    const match = tray.find((t) => t.id === wantId);
-    selected = match ? [match] : [{ id: wantId, title: "Highlight" }];
-  }
+  const selected = wantId ? [{ id: wantId, title: "" }] : await getHighlightsTray(user.id);
+  if (selected.length === 0) throw new IGError(`@${user.username} has no highlights.`, 0);
 
   // Build the download queue, one folder per highlight.
+  let owner = user?.username || "";
   const queue = [];
   for (let hi = 0; hi < selected.length; hi++) {
     const h = selected[hi];
-    const map = await getReelMedia([`highlight:${h.id}`]);
-    const items = map[`highlight:${h.id}`] || map[h.id] || [];
-    const folder = `${pad(hi + 1, 2)}_${sanitize(h.title)}`;
-    items.forEach((raw, i) => {
+    const reel = await getReel(`highlight:${h.id}`);
+    const title = h.title || reel.title || "Highlight";
+    owner = owner || reel.owner;
+    const folder = `${pad(hi + 1, 2)}_${sanitize(title)}`;
+    reel.items.forEach((raw, i) => {
       const ex = extractMedia(raw);
       const m = primaryMedia(ex);
       if (!m) return;
-      queue.push({ path: `${folder}/${pad(i + 1, 3)}_${dateStr(ex.takenAt)}.${m.type}`, url: m.url, ex, title: h.title });
+      queue.push({ path: `${folder}/${pad(i + 1, 3)}_${dateStr(ex.takenAt)}.${m.type}`, url: m.url, ex, title });
     });
     progress(jobId, "enumerating", queue.length, null, `Scanned ${hi + 1}/${selected.length} highlights…`);
     if (hi < selected.length - 1) await sleep(300); // be gentle between calls
@@ -411,7 +398,7 @@ async function exportHighlights(job, user) {
   entries.push({
     path: "index.json",
     bytes: textEncoder.encode(JSON.stringify({
-      username: user.username,
+      username: owner,
       exported_at: nowStamp(),
       type: "highlights",
       highlights: selected.length,
@@ -428,86 +415,58 @@ async function exportHighlights(job, user) {
   });
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
-  finishZip(job, createZip(entries), `${sanitize(user.username)}_highlights_${nowStamp()}.zip`, { highlights: selected.length, files: total, failed });
+  finishBlob(job, createZip(entries), `${sanitize(owner || "instagram")}_highlights_${nowStamp()}.zip`, { highlights: selected.length, files: total, failed });
 }
 
 async function exportProfilePic(job, user) {
-  const url = user.profile_pic_url_hd || user.profile_pic_url;
-  if (!url) throw new IGError("No profile picture available.", 0);
-  // The CDN URL downloads fine directly; no need to fetch+zip a single image.
-  send({
-    type: "EXPORT_DOWNLOAD_URL",
-    jobId: job.jobId,
-    url,
-    filename: `${sanitize(user.username)}_profile.jpg`,
-    summary: { profilePic: 1 },
-  });
+  if (!user.profile_pic_url_hd) throw new IGError("No profile picture available.", 0);
+  const bytes = await fetchBytes(user.profile_pic_url_hd);
+  finishBlob(job, bytes, withRealExt(`${sanitize(user.username)}_profile.jpg`, bytes), { profilePic: 1 });
 }
 
-async function exportSinglePost(job, user) {
+async function exportSinglePost(job) {
   const { jobId } = job;
   const code = job.options.shortcode;
   if (!code) throw new IGError("No post selected.", 0);
 
   progress(jobId, "enumerating", 1, 1, "Loading post…");
-  const mediaId = shortcodeToMediaId(code);
-  const raw = await getMediaInfo(mediaId);
+  const raw = await getMediaInfo(shortcodeToMediaId(code));
   const post = extractMedia(raw);
-  const files = planPostFiles(post, { imagesOnly: false });
+  const files = planPostFiles(post);
   if (files.length === 0) throw new IGError("That post has no downloadable media.", 0);
 
-  const base = `${sanitize(user.username || post.shortcode)}_${sanitize(code)}`;
+  const base = `${sanitize(raw.user?.username || job.username || post.shortcode)}_${sanitize(post.shortcode || code)}`;
+  const queue = files.map((f) => ({ path: f.name, url: f.url }));
+  const { entries, failed, total } = await fetchQueueToEntries(jobId, queue, "files");
+  if (entries.length === 0) throw new IGError("Couldn't download that post's media.", 0);
 
-  // Single media file → download it directly with the right extension.
-  if (files.length === 1 && !post.caption) {
-    send({
-      type: "EXPORT_DOWNLOAD_URL",
-      jobId,
-      url: files[0].url,
-      filename: `${base}.${files[0].name.split(".").pop()}`,
-      summary: { files: 1 },
-    });
+  // A lone media file with no caption is saved as-is rather than zipped.
+  if (queue.length === 1 && !post.caption) {
+    finishBlob(job, entries[0].bytes, `${base}.${entries[0].path.split(".").pop()}`, { files: 1 });
     return;
   }
 
-  const total = files.length;
-  let done = 0;
-  let failed = 0;
-  progress(jobId, "downloading", 0, total, `Downloading ${total} files…`);
-  const fetched = await mapPool(files, MEDIA_CONCURRENCY, async (f) => {
-    try {
-      const bytes = await fetchBytes(f.url);
-      done++;
-      progress(jobId, "downloading", done, total);
-      return { path: f.name, bytes };
-    } catch {
-      failed++;
-      done++;
-      progress(jobId, "downloading", done, total);
-      return null;
-    }
-  });
-
-  const entries = fetched.filter(Boolean);
   if (post.caption) {
     entries.push({ path: "caption.txt", bytes: textEncoder.encode(post.caption) });
   }
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
-  const zipBytes = createZip(entries);
-  finishZip(job, zipBytes, `${base}.zip`, { files: total, failed });
+  finishBlob(job, createZip(entries), `${base}.zip`, { files: total, failed });
 }
 
 /* ===== finalize ===== */
 
-function finishZip(job, zipBytes, filename, summary) {
+// Without a type Chrome sniffs the blob and may swap the extension (.zip → .txt).
+const MIME = { zip: "application/zip", jpg: "image/jpeg", png: "image/png", webp: "image/webp", mp4: "video/mp4" };
+
+function finishBlob(job, bytes, filename, summary) {
   if (lastBlobUrl) {
     URL.revokeObjectURL(lastBlobUrl);
     lastBlobUrl = null;
   }
-  const blob = new Blob([zipBytes], { type: "application/zip" });
-  const url = URL.createObjectURL(blob);
+  const type = MIME[filename.split(".").pop()] || "application/octet-stream";
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
   lastBlobUrl = url;
-  send({ type: "EXPORT_DOWNLOAD_URL", jobId: job.jobId, url, filename, summary, revocable: true });
+  send({ type: "EXPORT_DOWNLOAD_URL", jobId: job.jobId, url, filename, summary });
 }
 
 /* ===== dispatch ===== */
@@ -515,6 +474,17 @@ function finishZip(job, zipBytes, filename, summary) {
 async function runExport(job) {
   const { jobId, mode, username } = job;
   try {
+    // A single post, or the one highlight open in the tab, carries its own
+    // owner — no profile lookup needed.
+    if (mode === "post") {
+      await exportSinglePost(job);
+      return;
+    }
+    if (mode === "highlights" && job.options.highlightId) {
+      await exportHighlights(job, null);
+      return;
+    }
+
     progress(jobId, "resolving", null, null, `Resolving @${username}…`);
     const user = await resolveUser(username);
 
@@ -523,13 +493,8 @@ async function runExport(job) {
       return;
     }
 
-    if (mode === "post") {
-      await exportSinglePost(job, user);
-      return;
-    }
-
-    // Feed-based modes need access to the user's posts.
-    if (user.is_private && !user.followed_by_viewer) {
+    // Everything else needs access to the user's content.
+    if (!user.can_view) {
       throw new IGError(`@${user.username} is private and you don't follow them.`, 403);
     }
 

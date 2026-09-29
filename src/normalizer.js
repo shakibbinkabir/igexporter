@@ -125,6 +125,10 @@ export function normalizeItem(item, info, userMap) {
     case 'link': {
       const text = item.link?.text || item.text;
       if (text && text.trim()) msg.content = text;
+      const ctx = item.link?.link_context;
+      if (ctx?.link_url) {
+        msg.share = { link: ctx.link_url, share_text: ctx.link_title || '', original_content_owner: '' };
+      }
       break;
     }
 
@@ -181,15 +185,24 @@ export function normalizeItem(item, info, userMap) {
       break;
     }
 
-    // Shared story.
+    // Shared story. Stories live at /stories/<owner>/<media pk>/, not /p/.
     case 'story_share': {
       const node = item.story_share?.media;
-      const code = node?.code;
+      const owner = item.story_share?.user?.username || node?.user?.username || '';
       msg.share = {
-        link: code ? `${IG}/p/${code}/` : item.story_share?.link || '',
+        link: owner && node?.pk ? `${IG}/stories/${owner}/${node.pk}/` : item.story_share?.link || '',
         share_text: item.story_share?.text || item.story_share?.title || '',
-        original_content_owner: item.story_share?.user?.username || node?.user?.username || '',
+        original_content_owner: owner,
       };
+      break;
+    }
+
+    // Shared profile.
+    case 'profile': {
+      const username = item.profile?.username;
+      if (username) {
+        msg.share = { link: `${IG}/${username}/`, share_text: item.profile.full_name || '', original_content_owner: username };
+      }
       break;
     }
 

@@ -13,6 +13,27 @@
 const APP_ID = "936619743392459";
 const ORIGIN = "https://www.instagram.com";
 
+// Persisted GraphQL queries used by instagram.com's own profile page (the old
+// REST profile/feed endpoints now answer 429 or an HTML page). Instagram
+// rotates these ids every so often; when profile export starts failing with a
+// GraphQL "execution error", open a profile on instagram.com, watch the
+// /graphql/query requests in DevTools, and copy the new doc_id + variables.
+const DOC_TIMELINE = "28570182382647478"; // a user's posts grid, by username
+const DOC_USER = "28036671149327607"; // profile header info, by user id
+const DOC_HIGHLIGHTS = "26970053832668570"; // highlights tray, by user id
+const TIMELINE_FLAGS = {
+  __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: true,
+  __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: false,
+  __relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider: false,
+};
+const USER_FLAGS = {
+  __relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider: true,
+  __relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider: false,
+  __relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider: false,
+  __relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider: true,
+  __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: false,
+};
+
 class IGError extends Error {
   constructor(message, status) {
     super(message);
@@ -37,6 +58,8 @@ async function fetchJson(path, { tries = 4 } = {}) {
       res = await fetch(url, {
         method: "GET",
         credentials: "include",
+        // A stalled request would otherwise leave the popup spinning forever.
+        signal: AbortSignal.timeout(20000),
         headers: {
           "x-ig-app-id": APP_ID,
           "x-requested-with": "XMLHttpRequest",
@@ -84,55 +107,66 @@ async function fetchJson(path, { tries = 4 } = {}) {
   throw lastErr || new IGError("Request failed.", 0);
 }
 
+// Run a persisted GraphQL query. GET needs no CSRF token, so this works from
+// the offscreen document with nothing but the session cookie.
+async function graphql(docId, variables) {
+  const qs = new URLSearchParams({ doc_id: docId, variables: JSON.stringify(variables) });
+  const res = await fetchJson(`/graphql/query/?${qs}`);
+  if (!res?.data) {
+    const e = res?.errors?.[0];
+    throw new IGError(`Instagram GraphQL error: ${e?.description || e?.message || "no data"}.`, 0);
+  }
+  return res.data;
+}
+
 /**
  * Resolve a username to its profile metadata.
- * @returns {{id, username, full_name, is_private, follows_viewer, followed_by_viewer, profile_pic_url, profile_pic_url_hd, media_count}}
+ * @returns {{id, username, full_name, is_private, can_view, profile_pic_url_hd}}
  */
 export async function resolveUser(username) {
   const clean = String(username).trim().replace(/^@/, "").toLowerCase();
   if (!clean) throw new IGError("Enter a username.", 0);
 
-  const data = await fetchJson(
-    `/api/v1/users/web_profile_info/?username=${encodeURIComponent(clean)}`
+  const search = await fetchJson(
+    `/api/v1/web/search/topsearch/?${new URLSearchParams({ query: clean, context: "blended" })}`
   );
-  const user = data?.data?.user;
-  if (!user) throw new IGError(`No such user: @${clean}`, 404);
+  const hit = (search.users || []).map((u) => u.user).find((u) => u?.username?.toLowerCase() === clean);
+  if (!hit) throw new IGError(`No such user: @${clean}`, 404);
 
+  const { user = {} } = await graphql(DOC_USER, { id: String(hit.pk), enable_integrity_filters: true, ...USER_FLAGS });
+  const isPrivate = !!(user.is_private ?? hit.is_private);
   return {
-    id: user.id,
-    username: user.username || clean,
-    full_name: user.full_name || "",
-    is_private: !!user.is_private,
-    followed_by_viewer: !!user.followed_by_viewer,
-    profile_pic_url: user.profile_pic_url || "",
-    profile_pic_url_hd: user.profile_pic_url_hd || user.profile_pic_url || "",
-    media_count: user.edge_owner_to_timeline_media?.count ?? null,
+    id: String(hit.pk),
+    username: user.username || hit.username,
+    full_name: user.full_name || hit.full_name || "",
+    is_private: isPrivate,
+    // friendship_status is null on your own profile, which you can always see.
+    can_view: !isPrivate || !user.friendship_status || !!user.friendship_status.following,
+    profile_pic_url_hd: user.hd_profile_pic_url_info?.url || user.profile_pic_url || hit.profile_pic_url || "",
   };
 }
 
 /**
- * Walk a user's timeline feed page by page (newest first).
- * onItems(rawItems) may return true to stop pagination early.
+ * Walk a user's posts grid page by page (pinned posts first, then newest
+ * first). onItems(rawItems) may return true to stop pagination early.
  */
-export async function paginateFeed(userId, onItems, { pageDelayMs = 600 } = {}) {
-  let maxId = null;
-  let pages = 0;
-
+export async function paginateFeed(username, onItems, { pageDelayMs = 600 } = {}) {
+  let after = null;
   do {
-    const qs = new URLSearchParams({ count: "33" });
-    if (maxId) qs.set("max_id", maxId);
+    const data = await graphql(DOC_TIMELINE, {
+      data: { count: 33 }, // the server caps pages at 33
+      username,
+      ...(after ? { after } : {}),
+      ...TIMELINE_FLAGS,
+    });
+    const conn = data.xdt_api__v1__feed__user_timeline_graphql_connection;
+    if (!conn) throw new IGError("Instagram returned no posts grid.", 0);
 
-    const data = await fetchJson(`/api/v1/feed/user/${userId}/?${qs.toString()}`);
-    const items = Array.isArray(data.items) ? data.items : [];
-
-    const stop = await onItems(items);
+    const stop = await onItems((conn.edges || []).map((e) => e.node));
     if (stop) break;
 
-    maxId = data.next_max_id || null;
-    const more = data.more_available && maxId;
-    if (!more) break;
-
-    pages++;
+    after = conn.page_info?.has_next_page ? conn.page_info.end_cursor : null;
+    if (!after) break;
     await delay(pageDelayMs);
   } while (true);
 }
@@ -190,6 +224,8 @@ export function extractMedia(item) {
     productType,
     kind,
     caption: item.caption?.text || "",
+    // Pinned posts lead the grid out of date order.
+    pinned: !!item.timeline_pinned_user_ids?.length,
     media,
   };
 }
@@ -201,8 +237,11 @@ const SHORTCODE_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 export function shortcodeToMediaId(shortcode) {
+  let code = String(shortcode);
+  // Posts from private accounts get a 28-char suffix appended to the real code.
+  if (code.length > 28) code = code.slice(0, -28);
   let id = 0n;
-  for (const ch of String(shortcode)) {
+  for (const ch of code) {
     const idx = SHORTCODE_ALPHABET.indexOf(ch);
     if (idx === -1) throw new IGError(`Invalid post code: ${shortcode}`, 0);
     id = id * 64n + BigInt(idx);
@@ -219,49 +258,28 @@ export async function getMediaInfo(mediaId) {
 }
 
 /**
- * Currently-active (24h) story items for a user. Each item is a raw media node
- * with the same media_type / image_versions2 / video_versions shape as a feed
- * post. Returns [] when there's nothing live.
+ * Fetch one "reel" — a user's active story ring (numeric user id) or a
+ * highlight ("highlight:1790…"). Each item has the same media_type /
+ * image_versions2 / video_versions shape as a feed post.
+ * @returns {{items: Array, title: string, owner: string}}
  */
-export async function getActiveStory(userId) {
-  const data = await fetchJson(`/api/v1/feed/user/${userId}/story/`);
-  const items = data?.reel?.items || data?.story?.items;
-  return Array.isArray(items) ? items : [];
+export async function getReel(reelId) {
+  const data = await fetchJson(`/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(reelId)}`);
+  const reel = data?.reels?.[reelId] || {};
+  return {
+    items: Array.isArray(reel.items) ? reel.items : [],
+    title: reel.title || "",
+    owner: reel.user?.username || "",
+  };
 }
 
 /** Highlights tray for a user → [{ id (numeric string), title }]. */
 export async function getHighlightsTray(userId) {
-  const data = await fetchJson(`/api/v1/highlights/${userId}/highlights_tray/`);
-  const tray = Array.isArray(data?.tray) ? data.tray : [];
-  return tray.map((t) => ({
-    id: String(t.id || "").replace(/^highlight:/, ""),
-    title: t.title || "Highlight",
+  const data = await graphql(DOC_HIGHLIGHTS, { user_id: String(userId) });
+  return (data.highlights?.edges || []).map(({ node }) => ({
+    id: String(node.id || "").replace(/^highlight:/, ""),
+    title: node.title || "Highlight",
   }));
-}
-
-/**
- * Fetch media items for one or more "reels" (story rings or highlights).
- * `reelIds` entries look like "highlight:1790…" or a numeric user id.
- * Returns a map: reelId → raw items[].
- */
-export async function getReelMedia(reelIds) {
-  const qs = reelIds.map((id) => `reel_ids=${encodeURIComponent(id)}`).join("&");
-  const data = await fetchJson(`/api/v1/feed/reels_media/?${qs}`);
-  const out = {};
-
-  // Newer shape: { reels: { "<id>": { items: [...] } } }
-  const reels = data?.reels || {};
-  for (const [key, val] of Object.entries(reels)) {
-    out[key] = Array.isArray(val?.items) ? val.items : [];
-  }
-  // Older shape: { reels_media: [ { id, items: [...] } ] }
-  if (Array.isArray(data?.reels_media)) {
-    for (const r of data.reels_media) {
-      const key = r.id != null ? String(r.id) : null;
-      if (key && !out[key]) out[key] = Array.isArray(r.items) ? r.items : [];
-    }
-  }
-  return out;
 }
 
 export { IGError };
