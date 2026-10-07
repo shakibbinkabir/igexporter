@@ -60,6 +60,13 @@ function sanitize(name) {
     .replace(/^[_.]+|_+$/g, "") || "untitled";
 }
 
+// Usernames and post codes are already file-safe ([A-Za-z0-9._-]); keep them
+// verbatim. sanitize() would trim a leading or trailing underscore off them,
+// naming @some_user_'s files after @some_user.
+function ident(id) {
+  return String(id).replace(/[^\w.\-]+/g, "_") || "untitled";
+}
+
 function pad(n, width = 2) {
   return String(n).padStart(width, "0");
 }
@@ -239,7 +246,7 @@ async function exportFolderedZip(job, user, { imagesOnly }) {
   const queue = [];
   posts.forEach((p, i) => {
     const idx = i + 1;
-    const folder = `${pad(idx, 3)}_${dateStr(p.post.takenAt)}_${sanitize(p.post.shortcode)}`;
+    const folder = `${pad(idx, 3)}_${dateStr(p.post.takenAt)}_${ident(p.post.shortcode)}`;
     p.folder = folder;
     for (const f of p.files) queue.push({ path: `${folder}/${f.name}`, url: f.url, file: f });
   });
@@ -277,7 +284,7 @@ async function exportFolderedZip(job, user, { imagesOnly }) {
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
   const zipBytes = createZip(entries);
   const suffix = imagesOnly ? "images" : "posts";
-  finishBlob(job, zipBytes, `${sanitize(user.username)}_${suffix}_${nowStamp()}.zip`, { posts: posts.length, files: total, failed });
+  finishBlob(job, zipBytes, `${ident(user.username)}_${suffix}_${nowStamp()}.zip`, { posts: posts.length, files: total, failed });
 }
 
 async function exportReels(job, user) {
@@ -290,7 +297,7 @@ async function exportReels(job, user) {
     const idx = i + 1;
     const video = r.media.find((m) => m.isVideo);
     if (!video) return;
-    const name = `${pad(idx, 3)}_${dateStr(r.takenAt)}_${sanitize(r.shortcode)}.mp4`;
+    const name = `${pad(idx, 3)}_${dateStr(r.takenAt)}_${ident(r.shortcode)}.mp4`;
     queue.push({ path: name, url: video.url, post: r });
   });
 
@@ -315,7 +322,7 @@ async function exportReels(job, user) {
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
   const zipBytes = createZip(entries);
-  finishBlob(job, zipBytes, `${sanitize(user.username)}_reels_${nowStamp()}.zip`, { reels: total, failed });
+  finishBlob(job, zipBytes, `${ident(user.username)}_reels_${nowStamp()}.zip`, { reels: total, failed });
 }
 
 async function exportStories(job, user) {
@@ -329,7 +336,7 @@ async function exportStories(job, user) {
     const m = primaryMedia(ex);
     if (!m) return;
     queue.push({
-      path: `${pad(i + 1, 3)}_${dateStr(ex.takenAt)}_${sanitize(ex.shortcode)}.${m.type}`,
+      path: `${pad(i + 1, 3)}_${dateStr(ex.takenAt)}_${ident(ex.shortcode)}.${m.type}`,
       url: m.url,
       ex,
     });
@@ -359,7 +366,7 @@ async function exportStories(job, user) {
   });
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
-  finishBlob(job, createZip(entries), `${sanitize(user.username)}_stories_${nowStamp()}.zip`, { stories: total, failed });
+  finishBlob(job, createZip(entries), `${ident(user.username)}_stories_${nowStamp()}.zip`, { stories: total, failed });
 }
 
 // `user` is null when exporting just the highlight open in the tab — the
@@ -415,13 +422,13 @@ async function exportHighlights(job, user) {
   });
 
   progress(jobId, "zipping", null, null, "Packaging ZIP…");
-  finishBlob(job, createZip(entries), `${sanitize(owner || "instagram")}_highlights_${nowStamp()}.zip`, { highlights: selected.length, files: total, failed });
+  finishBlob(job, createZip(entries), `${ident(owner || "instagram")}_highlights_${nowStamp()}.zip`, { highlights: selected.length, files: total, failed });
 }
 
 async function exportProfilePic(job, user) {
   if (!user.profile_pic_url_hd) throw new IGError("No profile picture available.", 0);
   const bytes = await fetchBytes(user.profile_pic_url_hd);
-  finishBlob(job, bytes, withRealExt(`${sanitize(user.username)}_profile.jpg`, bytes), { profilePic: 1 });
+  finishBlob(job, bytes, withRealExt(`${ident(user.username)}_profile.jpg`, bytes), { profilePic: 1 });
 }
 
 async function exportSinglePost(job) {
@@ -435,7 +442,7 @@ async function exportSinglePost(job) {
   const files = planPostFiles(post);
   if (files.length === 0) throw new IGError("That post has no downloadable media.", 0);
 
-  const base = `${sanitize(raw.user?.username || job.username || post.shortcode)}_${sanitize(post.shortcode || code)}`;
+  const base = `${ident(raw.user?.username || job.username || post.shortcode)}_${ident(post.shortcode || code)}`;
   const queue = files.map((f) => ({ path: f.name, url: f.url }));
   const { entries, failed, total } = await fetchQueueToEntries(jobId, queue, "files");
   if (entries.length === 0) throw new IGError("Couldn't download that post's media.", 0);

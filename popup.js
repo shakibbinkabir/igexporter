@@ -381,12 +381,13 @@ function showProfileError(title, body) {
 
 function summaryLabel(s) {
   if (!s) return "complete";
+  const count = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
   const fail = s.failed ? `, ${s.failed} failed` : "";
-  if (s.posts != null) return `${s.posts} posts${fail}`;
-  if (s.reels != null) return `${s.reels} reels${fail}`;
-  if (s.stories != null) return `${s.stories} stories${fail}`;
-  if (s.highlights != null) return `${s.highlights} highlights, ${s.files} files${fail}`;
-  if (s.files != null) return `${s.files} files${fail}`;
+  if (s.posts != null) return count(s.posts, "post") + fail;
+  if (s.reels != null) return count(s.reels, "reel") + fail;
+  if (s.stories != null) return count(s.stories, "story", "stories") + fail;
+  if (s.highlights != null) return `${count(s.highlights, "highlight")}, ${count(s.files, "file")}${fail}`;
+  if (s.files != null) return count(s.files, "file") + fail;
   if (s.profilePic) return "profile picture";
   return "complete";
 }

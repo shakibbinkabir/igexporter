@@ -15,6 +15,9 @@ const node = (ts, who, content_type, content, extra = {}) => ({
   ...extra,
 });
 
+const call = (ts, who, plaintext) =>
+  node(ts, who, 'IG_VIDEO_CALL_XMAT', { __typename: 'SlideMessageAdminText', text_fragments: [{ plaintext }] });
+
 const info = {
   thread_id: '999',
   thread_title: null,
@@ -39,10 +42,14 @@ const out = normalize(info, [
     __typename: 'SlideMessageXMAContent',
     xma: { target_url: 'https://www.instagram.com/reel/abc/', header_title_text: 'owner' },
   }),
-  node(5000, them, 'IG_VIDEO_CALL_XMAT', {
-    __typename: 'SlideMessageAdminText',
-    text_fragments: [{ plaintext: 'Other started an audio call' }],
-  }),
+  // Answered call: started + ended fold into one message, 60s apart.
+  call(5000, them, 'Other started an audio call'),
+  call(65000, them, 'Audio call ended'),
+  // Missed call: duration 0.
+  call(70000, them, 'Other started a video chat'),
+  call(90000, them, 'You missed a video chat'),
+  // An end notice whose start wasn't loaded stays a plain text row.
+  call(100000, them, 'Audio call ended'),
   node(6000, them, 'REACTION_LOG_XMAT', {
     __typename: 'SlideMessageAdminText',
     text_fragments: [{ plaintext: 'Liked a message' }],
@@ -67,7 +74,7 @@ assert.equal(out.title, 'Other Person');
 assert.equal(out.thread_path, 'inbox/other_person_999');
 
 // Newest first; the reaction log, the blank text and the placeholder are gone.
-assert.deepEqual(out.messages.map((m) => m.timestamp_ms), [7000, 5000, 4000, 3000, 2000, 1000]);
+assert.deepEqual(out.messages.map((m) => m.timestamp_ms), [100000, 70000, 7000, 5000, 4000, 3000, 2000, 1000]);
 const at = (ts) => out.messages.find((m) => m.timestamp_ms === ts);
 
 assert.equal(at(1000).content, 'hi');
@@ -82,6 +89,11 @@ assert.deepEqual(at(4000).share, {
   original_content_owner: 'owner',
 });
 assert.equal(at(5000).content, 'Other started an audio call');
+assert.equal(at(5000).call_duration, 60);
+assert.equal(at(70000).call_duration, 0);
+assert.equal(at(100000).content, 'Audio call ended');
+assert.equal('call_duration' in at(100000), false);
+assert.equal('call_duration' in at(1000), false);
 assert.equal(at(7000).videos[0].uri, 'https://cdn/v.mp4?x=1');
 assert.equal(at(7000).photos[0].uri, 'https://cdn/p.jpg');
 

@@ -149,11 +149,21 @@
   // live count tracks the export.
   function exportableCount() {
     let n = 0;
+    let afterEnd = false; // the previous (newer) call notice was an "ended"/"missed" one
     for (const node of store.items.values()) {
       const c = node.content || {};
-      // Dropped by the normalizer: system rows other than call notices, and
-      // placeholders for shares that are no longer available.
-      if (c.__typename === "SlideMessageAdminText" && !/CALL/.test(node.content_type || "")) continue;
+      if (c.__typename === "SlideMessageAdminText") {
+        // System rows are dropped, except call notices. The normalizer folds a
+        // call's two notices into one message: the store runs newest first, so
+        // a "started" notice right after an "ended"/"missed" one is that fold.
+        if (!/CALL/.test(node.content_type || "")) continue;
+        const text = (c.text_fragments || []).map((f) => f.plaintext || "").join("");
+        const start = /started/i.test(text);
+        if (!(start && afterEnd)) n++;
+        afterEnd = !start && /ended|missed/i.test(text);
+        continue;
+      }
+      // Placeholders for shares that are no longer available are dropped too.
       if (/Placeholder/.test(c.xma?.__typename || "") && !node.text_body) continue;
       n++;
     }
@@ -172,7 +182,9 @@
   // Fetch one page of history into the store: the newest page while there's no
   // cursor yet, the next older one after that.
   async function fetchPage() {
-    const data = await gql(DOC_MESSAGES, { id: store.urlId, after: store.cursor, [PAGE_VAR]: PAGE });
+    const urlId = store.urlId;
+    const data = await gql(DOC_MESSAGES, { id: urlId, after: store.cursor, [PAGE_VAR]: PAGE });
+    if (urlId !== store.urlId) return; // switched threads mid-request — not this thread's page
     const conn = data.fetch__SlideThread?.as_ig_direct_thread?.slide_messages;
     for (const { node } of conn?.edges || []) {
       if (node?.message_id) store.items.set(node.message_id, node);
@@ -191,6 +203,7 @@
       store.urlId = urlId;
 
       const head = await gql(DOC_THREAD, { thread_fbid: urlId });
+      if (urlId !== store.urlId) return; // switched threads mid-request
       const thread = head.get_slide_thread_nullable?.as_ig_direct_thread;
       if (!thread) {
         throw new Error("Couldn't load this conversation. Open it fresh, then try again.");
@@ -207,6 +220,7 @@
       };
 
       await fetchPage();
+      if (urlId !== store.urlId) return;
       store.loadedFirst = true;
 
       broadcastUpdate();
@@ -274,8 +288,9 @@
   // doesn't bubble, but it does reach capture-phase listeners on ancestors).
   let scrollDebounce = null;
   function onDocumentScroll() {
-    if (!capturing || autoScroll.active || fetching) return;
-    if (!store.loadedFirst || !store.hasOlder) return;
+    if (!capturing || autoScroll.active) return;
+    resetIfThreadChanged(); // capture follows the user into another thread
+    if (fetching || !store.loadedFirst || !store.hasOlder) return;
     clearTimeout(scrollDebounce);
     scrollDebounce = setTimeout(() => {
       if (capturing && !autoScroll.active) loadOlder();
@@ -413,7 +428,9 @@
   }
 
   // When the user switches to a different thread, drop the previous thread's
-  // data so a later capture/export can't mix conversations.
+  // data so a later capture/export can't mix conversations. Capture stays on
+  // across the switch, so start over on the new thread — otherwise nothing
+  // would load until capture was stopped and started again.
   function resetIfThreadChanged() {
     const urlId = getUrlId();
     if (urlId && urlId !== store.urlId) {
@@ -423,6 +440,8 @@
       store.cursor = null;
       store.hasOlder = true;
       store.loadedFirst = false;
+      fetching = false; // a request still in flight belongs to the old thread
+      if (capturing) loadNewest();
     }
   }
 

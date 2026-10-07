@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.2.1-blue.svg" alt="Version" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.2.2-blue.svg" alt="Version" /></a>
   <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
 </p>
 
@@ -53,7 +53,7 @@ Useful for:
 - **Newest-first ordering** matching DYI conventions.
 - **Real display names** — `sender_name` is always the actual name, never `"You"`.
 - **Schema validation** before download — invalid exports surface the exact problem rather than silently producing garbage.
-- **Multi-thread aware** — switch between threads while the extension is running; counts are tracked per thread.
+- **Multi-thread aware** — switch to another conversation while capturing and capture follows you: the previous thread's messages are dropped and the new thread starts loading, so an export never mixes conversations.
 
 ---
 
@@ -200,7 +200,7 @@ Nothing is sent off-device. The only network traffic is to Instagram and its med
 - **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
 - **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
 - **`creation_timestamp`** on media is derived from the message timestamp when Instagram doesn't expose a separate one.
-- **Call events** are exported as their notice text ("… started an audio call", "Audio call ended"), one message per row. Instagram's web API no longer exposes a call id or duration, so there is no `call_duration` field.
+- **Call events** are collapsed to one message per call (Instagram sends a "started" notice, then an "ended" or "missed" one), with the "started" text as `content`. Instagram's web API no longer exposes a duration, so `call_duration` is the gap between the two notices in seconds: it includes the time the call rang before it was answered, so it can read up to about a minute over the real talk time. Missed calls get `0`. The pairing matches Instagram's English notice text; in another UI language calls export as two plain text rows without a duration.
 - **Emojis are preserved natively** rather than mimicking the DYI export's well-known mojibake (`ð`) encoding.
 - **Unsupported/expired rows are skipped.** "Message unavailable" placeholders and view-once media whose URL has already expired carry no content, so they're dropped rather than exported as empty messages.
 - **The open conversation must be in your inbox.** The thread is located by scanning your inbox (the top several pages), so a conversation buried far down or in a separate message-requests folder may not resolve; open it fresh so it surfaces to the top.

@@ -2,6 +2,21 @@
 
 All notable changes to IG Exporter. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [3.2.2] — 2026-10-07
+
+### Fixed
+
+- **Call durations are back.** 3.2.1 exported calls as plain text with no `call_duration`, because Instagram's web API stopped exposing one. Each call is again a single message with a `call_duration` in seconds, now derived from the gap between Instagram's "started" and "ended" notices. That gap includes the time the call rang before it was answered, so it can read up to about a minute over the real talk time (checked against two calls with known durations: +2 s and +48 s). Missed calls get `0`.
+- **Switching conversations while capturing left the popup stuck at 0.** The previous thread's messages were dropped, but nothing loaded for the new one until you stopped and restarted capture. Capture now follows you into the new thread, whether you reopen the popup or just scroll.
+- **File names lost a leading or trailing underscore** from usernames and post codes, so `@some_user_`'s export was named after `@some_user` (`some_user_posts_…zip`), and a post code that starts or ends with `_` was clipped in its folder name. Both are kept verbatim now.
+- Profile export summaries read "1 posts", "1 highlights": singular counts are worded properly.
+
+### Changed
+
+- A call message now also carries Instagram's "… started an audio call" / "… started a video chat" text as `content`. In 3.2.0 it had `call_duration` only.
+- A call notice whose other half is outside the loaded range (for example an "ended" row at the very start of what you scrolled to) is exported as a plain text row without a duration.
+- Call pairing matches Instagram's English notice text. With Instagram in another language, calls export as two plain text rows.
+
 ## [3.2.1] — 2026-10-07
 
 ### Fixed
@@ -97,6 +112,7 @@ All notable changes to IG Exporter. Versions follow [Semantic Versioning](https:
 
 First open-source release: Manifest V3 rewrite around GraphQL interception, with DYI-compatible output and schema validation before download.
 
+[3.2.2]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.2.2
 [3.2.1]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.2.1
 [3.2.0]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.2.0
 [3.1.0]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.1.0

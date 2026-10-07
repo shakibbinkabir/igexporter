@@ -7,7 +7,8 @@
 // bridge.js fetches the open thread and hands the raw nodes (newest first)
 // plus the thread metadata here. Each node's content.__typename says what kind
 // of message it is; this file maps the ones that hold real content to DYI
-// messages and drops the system rows (SlideMessageAdminText) other than calls.
+// messages and drops the system rows (SlideMessageAdminText) other than calls,
+// which become one message per call with a derived call_duration.
 
 const UNKNOWN_PARTICIPANT = 'Instagram User';
 
@@ -41,7 +42,7 @@ function addMedia(msg, key, uris, timestamp_ms) {
   if (list.length) msg[key] = (msg[key] || []).concat(list);
 }
 
-/* ===== per-item conversion ===== */
+/* ===== calls ===== */
 
 // Call rows are admin text with a content_type like IG_VIDEO_CALL_XMAT (audio
 // calls use it too).
@@ -49,8 +50,41 @@ function isCallNotice(node) {
   return /CALL/.test(node.content_type || '');
 }
 
-// Returns a DYI message object, or null to drop the node.
-export function normalizeItem(node, names) {
+function adminText(node) {
+  return (node.content?.text_fragments || []).map((f) => f.plaintext || '').join('');
+}
+
+// A call arrives as two notices: "X started an audio call", then "Audio call
+// ended" or "You missed an audio call". DYI has one message per call with a
+// call_duration, so the second notice is folded into the first. Instagram's
+// web API exposes no duration: it is taken as the gap between the two notices,
+// which includes the time the call rang before it was answered (so it reads up
+// to about a minute over the talk time). Missed calls get 0.
+// ponytail: matches the English notices only; in another UI language a call
+// stays as two plain text rows. Add that language's words to the regexes below.
+//
+// Returns message_id -> seconds for a call's first notice, null for a folded
+// second one. Notices that don't pair up are absent and export as plain text.
+function pairCalls(nodes) {
+  const rows = nodes.filter(isCallNotice).sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+  const calls = new Map();
+  rows.forEach((row, i) => {
+    const next = rows[i + 1];
+    if (!next || !/started/i.test(adminText(row))) return;
+    const end = adminText(next);
+    const missed = /missed/i.test(end);
+    if (!missed && !/ended/i.test(end)) return;
+    calls.set(row.message_id, missed ? 0 : Math.round((next.timestamp_ms - row.timestamp_ms) / 1000));
+    calls.set(next.message_id, null);
+  });
+  return calls;
+}
+
+/* ===== per-item conversion ===== */
+
+// Returns a DYI message object, or null to drop the node. `calls` is the
+// pairCalls() result for the thread.
+export function normalizeItem(node, names, calls = new Map()) {
   const timestamp_ms = Number(node.timestamp_ms);
   if (!Number.isFinite(timestamp_ms) || timestamp_ms <= 0) return null;
 
@@ -60,12 +94,11 @@ export function normalizeItem(node, names) {
   // Plain text, or the caption typed alongside a share.
   let text = node.text_body || c.text_body || c.xma_text_body;
 
-  // System rows. Call notices ("X started an audio call") are kept as plain
-  // text — this API exposes no call id or duration to build a DYI
-  // call_duration from. The rest (reaction logs, "X named the group") go.
+  // System rows: only call notices are kept (minus the ones folded into their
+  // call). Reaction logs, "X named the group" and the like go.
   if (type === 'AdminText') {
-    if (!isCallNotice(node)) return null;
-    text = (c.text_fragments || []).map((f) => f.plaintext || '').join('');
+    if (!isCallNotice(node) || calls.get(node.message_id) === null) return null;
+    text = adminText(node);
   }
 
   const msg = {
@@ -75,6 +108,7 @@ export function normalizeItem(node, names) {
     is_unsent_image_by_messenger_kid_parent: false,
   };
   if (text && text.trim()) msg.content = text;
+  if (calls.has(node.message_id)) msg.call_duration = calls.get(node.message_id);
 
   switch (type) {
     case 'ImageContent':
@@ -200,8 +234,9 @@ export function normalize(threadInfo, items) {
   const title = info.thread_title || others[0] || UNKNOWN_PARTICIPANT;
   const thread_path = `inbox/${slugify(title)}_${info.thread_id || 'unknown'}`;
 
+  const calls = pairCalls(list);
   const messages = list
-    .map((node) => normalizeItem(node, names))
+    .map((node) => normalizeItem(node, names, calls))
     .filter(Boolean)
     .sort((a, b) => b.timestamp_ms - a.timestamp_ms);
 
