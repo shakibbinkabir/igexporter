@@ -1,15 +1,20 @@
 // src/bridge.js
 //
 // Content script on instagram.com. Drives the DM export UI (Start Capture /
-// Auto-scroll / Export) by actively fetching the open thread through
-// Instagram's private direct_v2 REST API.
+// Auto-scroll / Export) by actively fetching the open thread through the same
+// persisted GraphQL queries Instagram's own web client runs.
 //
-// Why active fetch instead of interception: Instagram moved DM GraphQL traffic
-// off the page's main thread into a worker / service worker, so a page-world
-// window.fetch / XMLHttpRequest hook (the previous approach in interceptor.js)
-// never saw the responses — the popup counted zero forever. The REST endpoints
-// below are the same ones IG's own web client hits; a same-origin credentialed
-// fetch from this content script carries the logged-in session cookie.
+// Why active fetch instead of interception: Instagram loads DM history off the
+// page's main thread, so a page-world window.fetch / XMLHttpRequest hook (the
+// original approach in interceptor.js) never saw the responses — the popup
+// counted zero forever. The direct_v2 REST endpoints this script used after
+// that (/api/v1/direct_v2/inbox/ and threads/<id>/) are gone from the web:
+// they answer 404 now.
+//
+// These queries are NOT public and Instagram rotates the doc ids every so
+// often. When capture starts failing with a GraphQL error, open a DM thread on
+// instagram.com and run require("<query name>.graphql").params.id in the
+// DevTools console for the two query names below, then paste the new ids here.
 //
 // The UI is unchanged: Start Capture loads the most recent page and lets the
 // count grow as you scroll up (each scroll pulls the next older page); Auto-
@@ -20,7 +25,10 @@
 (function () {
   const srcURL = chrome.runtime.getURL("src/");
   const APP_ID = "936619743392459"; // Instagram Web app id (see src/igapi.js)
-  const PAGE = 20; // messages per fetch — mirrors IG's own scroll granularity
+  const PAGE = 20; // messages per fetch — the server caps a page at 20
+  const DOC_THREAD = "28784987187762419"; // IGDInboxHeaderOffMsysQuery: title + participants
+  const DOC_MESSAGES = "28742488222105007"; // IGDMessageListOffMsysQuery: paged history
+  const PAGE_VAR = "__relay_internal__pv__IGDInitialMessagePageCountrelayprovider";
 
   // Export helpers load lazily on the first export so a slow/blocked module
   // import can never delay capture or status replies.
@@ -38,10 +46,9 @@
 
   /* ===== state ===== */
   const store = {
-    urlId: null, // messaging_thread_key from /direct/t/<id>/
-    threadId: null, // resolved direct_v2 thread_id (the long number)
-    threadInfo: null, // { thread_id, thread_title, users, viewer_id, viewer_name }
-    items: new Map(), // item_id -> raw direct_v2 item
+    urlId: null, // thread key from /direct/t/<id>/ — the queries take it as-is
+    threadInfo: null, // { thread_id, thread_title, users, viewer_fbid }
+    items: new Map(), // message_id -> raw SlideMessage node
     cursor: null, // pagination cursor for the next older page
     hasOlder: true, // is there more history to fetch?
     loadedFirst: false, // has the newest page been fetched yet?
@@ -67,24 +74,43 @@
     return m ? m[1] : null;
   }
 
-  /* ===== REST client ===== */
-  // GET an instagram.com JSON endpoint with IG's web headers, retrying on
-  // transient throttling (429) and 5xx with exponential backoff.
-  async function igFetch(path, tries = 4) {
+  /* ===== GraphQL client ===== */
+  // /api/graphql only answers with the session's fb_dtsg CSRF token, which
+  // Instagram embeds in every page's HTML. Fetched once per page load.
+  let dtsg = null;
+  async function getDtsg() {
+    if (dtsg) return dtsg;
+    let html;
+    try {
+      const res = await fetch("/direct/inbox/", { credentials: "include", signal: AbortSignal.timeout(20000) });
+      html = await res.text();
+    } catch {
+      throw new Error("Network request failed.");
+    }
+    dtsg = html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/)?.[1] || null;
+    if (!dtsg) throw new Error("Not authorized — make sure you're logged in to Instagram in this browser.");
+    return dtsg;
+  }
+
+  // Run one of Instagram's persisted queries and return its `data`, retrying
+  // on transient throttling (429) and 5xx with exponential backoff.
+  async function gql(docId, variables, tries = 4) {
+    const body = new URLSearchParams({
+      fb_dtsg: await getDtsg(),
+      doc_id: docId,
+      variables: JSON.stringify(variables),
+    });
     let lastErr = null;
     for (let attempt = 0; attempt < tries; attempt++) {
       let res;
       try {
-        res = await fetch(path, {
-          method: "GET",
+        res = await fetch("/api/graphql", {
+          method: "POST",
           credentials: "include",
           // A stalled request would otherwise hang capture forever.
           signal: AbortSignal.timeout(20000),
-          headers: {
-            "x-ig-app-id": APP_ID,
-            "x-requested-with": "XMLHttpRequest",
-            Accept: "application/json",
-          },
+          headers: { "x-ig-app-id": APP_ID },
+          body,
         });
       } catch (e) {
         lastErr = new Error("Network request failed.");
@@ -104,84 +130,34 @@
         throw new Error("Not authorized — make sure you're logged in to Instagram in this browser.");
       }
       if (!res.ok) throw new Error(`Unexpected response (${res.status}).`);
+      let json;
       try {
-        return await res.json();
+        json = await res.json();
       } catch {
+        dtsg = null; // a rejected token gets the HTML app shell back — refetch next time
         throw new Error("Instagram returned a non-JSON response.");
       }
+      if (!json.data) {
+        throw new Error(`Instagram GraphQL error: ${json.errors?.[0]?.message || "no data"}`);
+      }
+      return json.data;
     }
     throw lastErr || new Error("Request failed.");
-  }
-
-  // The /direct/t/<id>/ id is a messaging_thread_key, which the thread endpoint
-  // won't accept — it needs the long numeric thread_id. Scan the inbox (the
-  // open thread is almost always near the top, since the user just interacted
-  // with it) to find the matching thread and the viewer's own identity.
-  async function resolveThread(urlId) {
-    let cursor = null;
-    let viewer = null;
-    for (let page = 0; page < 6; page++) {
-      const qs = new URLSearchParams({
-        visual_message_return_type: "unseen",
-        persistentBadging: "true",
-        limit: "20",
-      });
-      if (cursor) qs.set("cursor", cursor);
-      const data = await igFetch(`/api/v1/direct_v2/inbox/?${qs.toString()}`);
-      if (!viewer && data.viewer) viewer = data.viewer;
-
-      const threads = data.inbox?.threads || [];
-      for (const t of threads) {
-        const ids = [
-          t.thread_id,
-          t.thread_v2_id,
-          t.messaging_thread_key,
-          ...(t.users || []).map((u) => u.interop_messaging_user_fbid),
-        ]
-          .filter(Boolean)
-          .map(String);
-        if (ids.includes(String(urlId))) return { thread: t, viewer };
-      }
-
-      cursor = data.inbox?.oldest_cursor || null;
-      if (!cursor || !data.inbox?.has_older) break;
-    }
-    return { thread: null, viewer };
-  }
-
-  function usersOf(thread) {
-    return (thread.users || []).map((u) => ({
-      pk: u.pk,
-      username: u.username,
-      full_name: u.full_name,
-    }));
-  }
-
-  function absorbThreadMeta(t) {
-    // The thread endpoint carries fuller participant/viewer metadata than the
-    // inbox preview; keep the richest we've seen.
-    if (!store.threadInfo) return;
-    if ((t.users || []).length) store.threadInfo.users = usersOf(t);
-    if (t.thread_title) store.threadInfo.thread_title = t.thread_title;
-    if (t.viewer_id) store.threadInfo.viewer_id = t.viewer_id;
   }
 
   // Approximate count of items that will survive normalization, so the popup's
   // live count tracks the export.
   function exportableCount() {
     let n = 0;
-    const calls = new Set();
-    for (const item of store.items.values()) {
-      const t = item.item_type;
-      if (t === "action_log" || t === "placeholder") continue;
-      if (t === "text" && !item.text?.trim()) continue; // dropped by the normalizer
-      if (t === "video_call_event") {
-        calls.add(item.video_call_event?.vc_id || item.item_id);
-        continue;
-      }
+    for (const node of store.items.values()) {
+      const c = node.content || {};
+      // Dropped by the normalizer: system rows other than call notices, and
+      // placeholders for shares that are no longer available.
+      if (c.__typename === "SlideMessageAdminText" && !/CALL/.test(node.content_type || "")) continue;
+      if (/Placeholder/.test(c.xma?.__typename || "") && !node.text_body) continue;
       n++;
     }
-    return n + calls.size;
+    return n;
   }
 
   function titleForPopup() {
@@ -193,7 +169,19 @@
   }
 
   /* ===== fetching ===== */
-  // Fetch the most recent page and resolve the thread. Runs once per capture.
+  // Fetch one page of history into the store: the newest page while there's no
+  // cursor yet, the next older one after that.
+  async function fetchPage() {
+    const data = await gql(DOC_MESSAGES, { id: store.urlId, after: store.cursor, [PAGE_VAR]: PAGE });
+    const conn = data.fetch__SlideThread?.as_ig_direct_thread?.slide_messages;
+    for (const { node } of conn?.edges || []) {
+      if (node?.message_id) store.items.set(node.message_id, node);
+    }
+    store.cursor = conn?.page_info?.end_cursor || null;
+    store.hasOlder = !!(conn?.page_info?.has_next_page && store.cursor);
+  }
+
+  // Load the thread's metadata and its most recent page. Runs once per capture.
   async function loadNewest() {
     if (store.loadedFirst || fetching) return;
     fetching = true;
@@ -202,29 +190,23 @@
       if (!urlId) throw new Error("Open a DM conversation (instagram.com/direct/t/...) first.");
       store.urlId = urlId;
 
-      const { thread, viewer } = await resolveThread(urlId);
+      const head = await gql(DOC_THREAD, { thread_fbid: urlId });
+      const thread = head.get_slide_thread_nullable?.as_ig_direct_thread;
       if (!thread) {
-        throw new Error("Couldn't find this conversation in your inbox. Open it fresh, then try again.");
+        throw new Error("Couldn't load this conversation. Open it fresh, then try again.");
       }
-      store.threadId = thread.thread_id;
       store.threadInfo = {
-        thread_id: thread.thread_id,
-        thread_v2_id: thread.thread_v2_id,
+        thread_id: thread.thread_fbid,
         thread_title: thread.thread_title || null,
-        users: usersOf(thread),
-        viewer_id: thread.viewer_id || viewer?.pk || null,
-        viewer_name: viewer ? viewer.full_name || viewer.username : null,
+        users: (thread.users || []).map((u) => ({
+          fbid: u.interop_messaging_user_fbid,
+          username: u.username,
+          full_name: u.full_name,
+        })),
+        viewer_fbid: thread.viewer?.interop_messaging_user_fbid || null,
       };
 
-      // Seed with the inbox preview's items, then fetch the newest full page.
-      for (const it of thread.items || []) if (it.item_id) store.items.set(it.item_id, it);
-
-      const data = await igFetch(`/api/v1/direct_v2/threads/${store.threadId}/?limit=${PAGE}`);
-      const t = data.thread || {};
-      for (const it of t.items || []) if (it.item_id) store.items.set(it.item_id, it);
-      absorbThreadMeta(t);
-      store.cursor = t.oldest_cursor || null;
-      store.hasOlder = !!(t.has_older && store.cursor);
+      await fetchPage();
       store.loadedFirst = true;
 
       broadcastUpdate();
@@ -239,22 +221,12 @@
 
   // Fetch the next older page. Returns true if new messages were added.
   async function loadOlder() {
-    if (fetching || !store.threadId || !store.hasOlder) return false;
+    if (fetching || !store.loadedFirst || !store.hasOlder) return false;
     if (getUrlId() !== store.urlId) return false; // user switched threads
     fetching = true;
     const before = store.items.size;
     try {
-      const qs = new URLSearchParams({ limit: String(PAGE) });
-      if (store.cursor) {
-        qs.set("cursor", store.cursor);
-        qs.set("direction", "older");
-      }
-      const data = await igFetch(`/api/v1/direct_v2/threads/${store.threadId}/?${qs.toString()}`);
-      const t = data.thread || {};
-      for (const it of t.items || []) if (it.item_id) store.items.set(it.item_id, it);
-      absorbThreadMeta(t);
-      store.cursor = t.oldest_cursor || null;
-      store.hasOlder = !!(t.has_older && store.cursor);
+      await fetchPage();
       broadcastUpdate();
       return store.items.size > before;
     } catch (err) {
@@ -446,7 +418,6 @@
     const urlId = getUrlId();
     if (urlId && urlId !== store.urlId) {
       store.urlId = urlId;
-      store.threadId = null;
       store.threadInfo = null;
       store.items.clear();
       store.cursor = null;

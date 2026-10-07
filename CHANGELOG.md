@@ -2,6 +2,20 @@
 
 All notable changes to IG Exporter. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [3.2.1] — 2026-10-07
+
+### Fixed
+
+- **DM export failed with *Unexpected response (404)*.** Instagram removed the `direct_v2` REST endpoints from the web — `/api/v1/direct_v2/inbox/` and `threads/<id>/` now answer `404` — so Start Capture failed before loading a single message. DM export now runs the same GraphQL queries as instagram.com's own message view.
+
+### Changed
+
+- The open `/direct/t/<id>/` thread is loaded straight from the id in its URL. The inbox lookup is gone, and with it the limit of only finding conversations among your 120 most recent.
+- Rewrote the message normalizer for the new `SlideMessage` shape — text, photos/videos, view-once media, voice messages, GIFs/stickers, shared reels/posts/links, and reactions.
+- **Call events are exported as their notice text** ("… started an audio call", "Audio call ended"), one message per row, with no `call_duration`: the new API exposes neither a call id nor a duration.
+- Your own name in the export comes from messages you sent. If none are in the loaded range, you appear as "Viewer".
+- Added `test/normalizer.test.mjs`, a self-check for the normalizer (`node test/normalizer.test.mjs`).
+
 ## [3.2.0] — 2026-09-29
 
 ### Fixed
@@ -83,6 +97,7 @@ All notable changes to IG Exporter. Versions follow [Semantic Versioning](https:
 
 First open-source release: Manifest V3 rewrite around GraphQL interception, with DYI-compatible output and schema validation before download.
 
+[3.2.1]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.2.1
 [3.2.0]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.2.0
 [3.1.0]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.1.0
 [3.0.1]: https://github.com/shakibbinkabir/igexporter/releases/tag/v3.0.1

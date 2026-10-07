@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Instagram Exporter",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Export Instagram DMs to DYI-format JSON, and download anyone's posts, images, reels, or profile picture as foldered ZIPs.",
   "permissions": [
     "activeTab",

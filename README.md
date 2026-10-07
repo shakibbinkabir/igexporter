@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.2.0-blue.svg" alt="Version" /></a>
+  <a href="https://github.com/shakibbinkabir/igexporter/releases"><img src="https://img.shields.io/badge/version-3.2.1-blue.svg" alt="Version" /></a>
   <a href="https://developer.chrome.com/docs/extensions/mv3/intro/"><img src="https://img.shields.io/badge/Manifest-V3-green.svg" alt="Manifest V3" /></a>
 </p>
 
@@ -18,7 +18,7 @@ A vanilla-JavaScript, fully local Chrome Extension that **(1)** exports an Insta
 
 ## Why
 
-Instagram's official DYI export can take **hours to weeks** to be ready, and you only get *everything* — not just the one conversation you actually need. IG Exporter pulls a single thread's full history directly from Instagram's own `direct_v2` API, normalizes it into the exact same shape as the DYI `message_*.json` files, and hands you a download.
+Instagram's official DYI export can take **hours to weeks** to be ready, and you only get *everything* — not just the one conversation you actually need. IG Exporter pulls a single thread's full history directly from Instagram's own DM GraphQL queries, normalizes it into the exact same shape as the DYI `message_*.json` files, and hands you a download.
 
 Useful for:
 
@@ -105,7 +105,7 @@ username_posts_2026-06-06.zip
 
 1. Go to <https://www.instagram.com/> and open a DM thread.
 2. Click the **IG Exporter** icon in your toolbar and click **Start Capture**. The most recent messages load right away.
-3. **Scroll up** inside the thread to pull in older history — each scroll fetches the next page from Instagram's `direct_v2` API and the count climbs. Or click **Auto-scroll** to load the rest of the thread automatically; it stops when it reaches the beginning (or click it again to stop early).
+3. **Scroll up** inside the thread to pull in older history — each scroll fetches the next page from Instagram and the count climbs. Or click **Auto-scroll** to load the rest of the thread automatically; it stops when it reaches the beginning (or click it again to stop early).
 4. When you've loaded as much as you want, click **Export JSON**.
 5. The exporter validates the structure, then prompts you to save `instagram_<title>_<timestamp>.json`.
 
@@ -148,9 +148,9 @@ The two capabilities use two independent pipelines.
 
 ```
 popup.js (Chat tab) ──▶ src/bridge.js (content script on instagram.com)
-                                  │  fetches the open thread via the direct_v2 API
+                                  │  fetches the open thread via persisted GraphQL queries
                                   ▼
-                         instagram.com /api/v1/direct_v2/  (inbox lookup + paged thread history)
+                         instagram.com /api/graphql  (thread metadata + paged thread history)
                                   │
                                   ▼
                        src/normalizer.js → src/schema.js
@@ -174,8 +174,8 @@ popup.js (Profile tab) ──job──▶ background.js (service worker)
       your session cookie)
 ```
 
-- **`bridge.js`** — content script on instagram.com. On **Start Capture** it resolves the open `/direct/t/<id>/` thread to its `direct_v2` `thread_id` via an inbox lookup and loads the newest page; scrolling the thread (or **Auto-scroll**) pages older history from `/api/v1/direct_v2/threads/<id>/` using your session cookie, streaming the live count to the popup.
-- **`normalizer.js` / `schema.js`** — map each `direct_v2` message item (`text`, `media`, `raven_media`, `voice_media`, `clip`, `media_share`, `reel_share`, `video_call_event`, …) to the DYI shape and validate it. If Instagram changes the DM API, these two plus `bridge.js` are where the fix goes.
+- **`bridge.js`** — content script on instagram.com. On **Start Capture** it loads the open `/direct/t/<id>/` thread's metadata and newest page through the same persisted GraphQL queries Instagram's web client runs (`POST /api/graphql` with your session cookie and the page's `fb_dtsg` token); scrolling the thread (or **Auto-scroll**) pages older history, streaming the live count to the popup. The query doc ids at the top of the file rotate — the header comment says how to refresh them.
+- **`normalizer.js` / `schema.js`** — map each `SlideMessage` node (text, images, videos, view-once media, voice messages, GIFs/stickers, shared reels/posts/links, call notices, …) to the DYI shape and validate it. If Instagram changes the DM API, these two plus `bridge.js` are where the fix goes.
 - **`background.js`** — MV3 service worker; the stable hub for profile exports. Spins up the offscreen document, mirrors progress onto the toolbar badge, and performs every `chrome.downloads.download` (chat JSON included), re-asserting the filename so download-manager extensions like IDM can't rename it.
 - **`offscreen.js` / `offscreen.html`** — a headless offscreen document (the only context that can both fetch with host permissions *and* `URL.createObjectURL` a blob). Runs the chosen export pipeline, fetches CDN bytes with bounded concurrency, and assembles the ZIP.
 - **`src/igapi.js`** — thin client over the endpoints instagram.com itself uses: search (username → id), the profile page's GraphQL queries (posts grid, profile info, highlights tray), `reels_media` (stories and highlights), and media info (single posts). The one file to patch if Instagram changes its endpoints.
@@ -200,7 +200,7 @@ Nothing is sent off-device. The only network traffic is to Instagram and its med
 - **Media URIs are CDN URLs**, not local file paths. Instagram's web client never downloads media to disk; you'd have to fetch each URL separately.
 - **`thread_path`** is a best-effort slug; the inner DYI folder IDs are private to the mobile/desktop DYI pipeline.
 - **`creation_timestamp`** on media is derived from the message timestamp when Instagram doesn't expose a separate one.
-- **Call events** are collapsed to one message per call (Instagram sends a separate "started" and "ended" row); the real `call_duration` in seconds comes from the `video_call_event` payload when present, otherwise `0` for missed/declined calls.
+- **Call events** are exported as their notice text ("… started an audio call", "Audio call ended"), one message per row. Instagram's web API no longer exposes a call id or duration, so there is no `call_duration` field.
 - **Emojis are preserved natively** rather than mimicking the DYI export's well-known mojibake (`ð`) encoding.
 - **Unsupported/expired rows are skipped.** "Message unavailable" placeholders and view-once media whose URL has already expired carry no content, so they're dropped rather than exported as empty messages.
 - **The open conversation must be in your inbox.** The thread is located by scanning your inbox (the top several pages), so a conversation buried far down or in a separate message-requests folder may not resolve; open it fresh so it surfaces to the top.
@@ -232,8 +232,8 @@ igexporter/
 ├── offscreen.html         # headless offscreen document host
 ├── offscreen.js           # profile export engine (fetch → zip → download)
 ├── src/
-│   ├── bridge.js          # chat: content script — direct_v2 API fetch + paging
-│   ├── normalizer.js      # chat: raw direct_v2 items → DYI shape
+│   ├── bridge.js          # chat: content script — GraphQL fetch + paging
+│   ├── normalizer.js      # chat: raw SlideMessage nodes → DYI shape
 │   ├── schema.js          # chat: output validator
 │   ├── igapi.js           # profile: Instagram web API client
 │   └── zip.js             # profile: store-only ZIP writer
